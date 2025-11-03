@@ -18,6 +18,15 @@ from app.crud.education import (
     mark_lesson_complete,
     get_user_course_progress,
     get_user_lesson_progress,
+    get_quizzes,
+    get_quiz,
+    create_quiz,
+    update_quiz,
+    delete_quiz,
+    submit_quiz_answers,
+    get_user_quiz_attempts,
+    get_user_best_quiz_score,
+    get_user_quiz_attempts_count,
 )
 from app.schemas.education import (
     CourseResponse,
@@ -25,8 +34,13 @@ from app.schemas.education import (
     CourseUpdate,
     LessonResponse,
     CourseProgressResponse,
+    QuizResponse,
+    QuizCreate,
+    QuizUpdate,
+    QuizSubmission,
+    QuizResult,
+    QuizAttemptHistory,
 )
-from app.core.redis import RedisCache
 
 security = HTTPBearer(auto_error=False)
 
@@ -69,16 +83,6 @@ def list_courses(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Get all courses with optional filtering"""
-    # Cache only for anonymous users (authenticated responses include per-user completion)
-    cache_key = None
-    if not current_user:
-        key_cat = (category or "all").strip().lower()
-        key_search = (search or "").strip().lower()
-        cache_key = f"education:courses:list:{key_cat}:{key_search}:{skip}:{limit}"
-        cached = RedisCache.get(cache_key)
-        if cached is not None:
-            return cached
-
     courses = get_courses(db, category=category, search=search, skip=skip, limit=limit)
     
     result = []
@@ -138,9 +142,6 @@ def list_courses(
         course_dict["lessons"] = sorted(lesson_list, key=lambda x: x["order"])
         result.append(course_dict)
 
-    # Store in cache for anonymous users
-    if cache_key:
-        RedisCache.set(cache_key, result, expire=3600)
     return result
 
 
@@ -151,16 +152,7 @@ def get_course_detail(
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Get course details with lessons"""
-    # Cache only for anonymous users
-    cache_key = None
-    course = None
-    if not current_user:
-        cache_key = f"education:courses:detail:{course_id}"
-        cached = RedisCache.get(cache_key)
-        if cached is not None:
-            return cached
-
-    course = course or get_course(db, course_id)
+    course = get_course(db, course_id)
     if not course:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Course not found"
@@ -219,9 +211,6 @@ def get_course_detail(
             course_dict["progress"] = int((completed_count / len(lesson_list)) * 100)
 
     course_dict["lessons"] = sorted(lesson_list, key=lambda x: x["order"])
-    # Cache for anonymous users
-    if cache_key:
-        RedisCache.set(cache_key, course_dict, expire=3600)
     return course_dict
 
 
@@ -233,9 +222,6 @@ def create_new_course(
 ):
     """Create a new course (admin only - implement admin check as needed)"""
     created = create_course(db, course)
-    # Invalidate list caches (broad strategy: rely on TTL or delete common keys if tracked)
-    # Here we only invalidate detail key of new course (lists will refresh after TTL)
-    RedisCache.delete(f"education:courses:detail:{created.id}")
     return created
 
 
@@ -252,8 +238,6 @@ def update_course_info(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Course not found"
         )
-    # Invalidate detail cache for this course; list caches rely on TTL
-    RedisCache.delete(f"education:courses:detail:{course_id}")
     return course
 
 
@@ -268,8 +252,6 @@ def delete_course_endpoint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Course not found"
         )
-    # Invalidate detail cache
-    RedisCache.delete(f"education:courses:detail:{course_id}")
     return None
 
 
@@ -373,3 +355,264 @@ def get_course_progress(
         "completed_lessons": completed,
         "total_lessons": len(lessons),
     }
+
+
+# Quiz endpoints
+@router.get("/quizzes", response_model=List[QuizResponse])
+def list_quizzes(
+    category: Optional[str] = Query(None, description="Filter by category"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Get all quizzes with optional filtering"""
+    quizzes = get_quizzes(db, category=category, skip=skip, limit=limit)
+    
+    result = []
+    for quiz in quizzes:
+        quiz_dict = {
+            "id": quiz.id,
+            "title": quiz.title,
+            "description": quiz.description,
+            "category": quiz.category,
+            "created_at": quiz.created_at,
+            "updated_at": quiz.updated_at,
+            "questions": [],
+            "best_score": None,
+            "attempts_count": 0,
+        }
+
+        # Get questions
+        question_list = []
+        for question in quiz.questions:
+            question_dict = {
+                "id": question.id,
+                "quiz_id": question.quiz_id,
+                "question": question.question,
+                "question_type": question.question_type.value,
+                "options": question.options or [],
+                "order": question.order,
+                "explanation": question.explanation,
+                "created_at": question.created_at,
+            }
+            question_list.append(question_dict)
+
+        quiz_dict["questions"] = sorted(question_list, key=lambda x: x["order"])
+
+        # Get user's best score and attempts count if authenticated
+        if current_user:
+            best_score = get_user_best_quiz_score(db, current_user.id, quiz.id)
+            attempts_count = get_user_quiz_attempts_count(db, current_user.id, quiz.id)
+            quiz_dict["best_score"] = best_score
+            quiz_dict["attempts_count"] = attempts_count
+
+        result.append(quiz_dict)
+
+    return result
+
+
+@router.get("/quizzes/{quiz_id}", response_model=QuizResponse)
+def get_quiz_detail(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Get quiz details with questions"""
+    quiz = get_quiz(db, quiz_id)
+    if not quiz:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
+        )
+
+    quiz_dict = {
+        "id": quiz.id,
+        "title": quiz.title,
+        "description": quiz.description,
+        "category": quiz.category,
+        "created_at": quiz.created_at,
+        "updated_at": quiz.updated_at,
+        "questions": [],
+        "best_score": None,
+        "attempts_count": 0,
+    }
+
+    # Get questions (don't include correct_answer - that's hidden until submission)
+    question_list = []
+    for question in quiz.questions:
+        question_dict = {
+            "id": question.id,
+            "quiz_id": question.quiz_id,
+            "question": question.question,
+            "question_type": question.question_type.value,
+            "options": question.options or [],
+            "order": question.order,
+            "explanation": question.explanation,
+            "created_at": question.created_at,
+        }
+        question_list.append(question_dict)
+
+    quiz_dict["questions"] = sorted(question_list, key=lambda x: x["order"])
+
+    # Get user's best score and attempts count if authenticated
+    if current_user:
+        best_score = get_user_best_quiz_score(db, current_user.id, quiz_id)
+        attempts_count = get_user_quiz_attempts_count(db, current_user.id, quiz_id)
+        quiz_dict["best_score"] = best_score
+        quiz_dict["attempts_count"] = attempts_count
+
+    return quiz_dict
+
+
+@router.post("/quizzes/{quiz_id}/submit", response_model=QuizResult, status_code=status.HTTP_200_OK)
+def submit_quiz(
+    quiz_id: int,
+    submission: QuizSubmission,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Submit quiz answers and get results"""
+    try:
+        attempt = submit_quiz_answers(db, current_user.id, quiz_id, submission)
+        
+        # Get the quiz to calculate question results
+        quiz = get_quiz(db, quiz_id)
+        if not quiz:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
+            )
+
+        # Calculate question results for response and collect correct answers
+        question_results = {}
+        correct_answers = {}
+        for question in quiz.questions:
+            user_answer = submission.answers.get(question.id)
+            if user_answer is None:
+                question_results[question.id] = False
+                correct_answers[question.id] = question.correct_answer
+                continue
+
+            is_correct = False
+            if question.question_type.value == "multiple-choice":
+                is_correct = user_answer == question.correct_answer
+            elif question.question_type.value == "true-false":
+                is_correct = user_answer == question.correct_answer
+            elif question.question_type.value == "multiple-select":
+                if isinstance(user_answer, list) and isinstance(question.correct_answer, list):
+                    is_correct = sorted(user_answer) == sorted(question.correct_answer)
+            
+            question_results[question.id] = is_correct
+            correct_answers[question.id] = question.correct_answer
+
+        return QuizResult(
+            quiz_id=quiz_id,
+            score=attempt.score,
+            total_questions=attempt.total_questions,
+            percentage=attempt.percentage,
+            answers=submission.answers,
+            question_results=question_results,
+            correct_answers=correct_answers,
+            completed_at=attempt.completed_at,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e)
+        )
+
+
+@router.get("/quizzes/{quiz_id}/attempts", response_model=List[QuizAttemptHistory])
+def get_quiz_attempts(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get user's attempts for a specific quiz"""
+    quiz = get_quiz(db, quiz_id)
+    if not quiz:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
+        )
+
+    attempts = get_user_quiz_attempts(db, current_user.id, quiz_id)
+    
+    return [
+        QuizAttemptHistory(
+            id=attempt.id,
+            quiz_id=attempt.quiz_id,
+            quiz_title=quiz.title,
+            score=attempt.score,
+            total_questions=attempt.total_questions,
+            percentage=attempt.percentage,
+            completed_at=attempt.completed_at,
+        )
+        for attempt in attempts
+    ]
+
+
+@router.get("/quizzes/history/all", response_model=List[QuizAttemptHistory])
+def get_all_quiz_attempts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get user's all quiz attempts"""
+    attempts = get_user_quiz_attempts(db, current_user.id)
+    
+    # Get quiz titles for each attempt
+    result = []
+    for attempt in attempts:
+        quiz = get_quiz(db, attempt.quiz_id)
+        if quiz:
+            result.append(
+                QuizAttemptHistory(
+                    id=attempt.id,
+                    quiz_id=attempt.quiz_id,
+                    quiz_title=quiz.title,
+                    score=attempt.score,
+                    total_questions=attempt.total_questions,
+                    percentage=attempt.percentage,
+                    completed_at=attempt.completed_at,
+                )
+            )
+    
+    return result
+
+
+@router.post("/quizzes", response_model=QuizResponse, status_code=status.HTTP_201_CREATED)
+def create_new_quiz(
+    quiz: QuizCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a new quiz (admin only - implement admin check as needed)"""
+    created = create_quiz(db, quiz)
+    return created
+
+
+@router.put("/quizzes/{quiz_id}", response_model=QuizResponse)
+def update_quiz_info(
+    quiz_id: int,
+    quiz_update: QuizUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update quiz (admin only)"""
+    quiz = update_quiz(db, quiz_id, quiz_update)
+    if not quiz:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
+        )
+    return quiz
+
+
+@router.delete("/quizzes/{quiz_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_quiz_endpoint(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete quiz (admin only)"""
+    if not delete_quiz(db, quiz_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
+        )
+    return None

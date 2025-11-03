@@ -9,12 +9,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.core.database import SessionLocal
-from app.crud.education import create_course, get_courses
+from app.crud.education import create_course, get_courses, create_quiz, get_quizzes
 from app.schemas.education import (
     CourseCreate,
     LessonBase,
     LessonType,
     CourseLevel,
+    QuizCreate,
+    QuestionBase,
+    QuestionType,
 )
 
 
@@ -184,6 +187,97 @@ def seed_education_data():
             print(f"✓ Created course: {course_data['course']['title']}")
 
         print("\n✅ Course data seeded successfully!")
+
+        # Check if quizzes already exist
+        existing_quizzes = get_quizzes(db, limit=1)
+        if existing_quizzes:
+            print("\n⚠️  Quizzes already exist in database. Skipping quiz seed to avoid duplicates.")
+        else:
+            # Quizzes data
+            quizzes_data = [
+            {
+                "title": "Stock Market Basics Quiz",
+                "description": "Test your knowledge of stock market fundamentals",
+                "category": "Stocks",
+                "questions": [
+                    QuestionBase(
+                        question="What is the P/E ratio?",
+                        question_type=QuestionType.MULTIPLE_CHOICE,
+                        options=[
+                            "Price to Earnings",
+                            "Profit to Equity",
+                            "Price to Equity",
+                            "Profit to Earnings",
+                        ],
+                        correct_answer=0,
+                        order=1,
+                        explanation="P/E ratio stands for Price to Earnings, which is calculated by dividing a company's stock price by its earnings per share. It helps investors assess whether a stock is overvalued or undervalued relative to its earnings.",
+                    ),
+                    QuestionBase(
+                        question="A higher P/E ratio always means a stock is overvalued.",
+                        question_type=QuestionType.TRUE_FALSE,
+                        options=None,
+                        correct_answer=False,
+                        order=2,
+                        explanation="A high P/E ratio doesn't always mean a stock is overvalued. It could indicate strong growth prospects, market confidence, or industry norms. Context and comparison with peers are important when evaluating P/E ratios.",
+                    ),
+                    QuestionBase(
+                        question="Which factors affect stock prices? (Select all that apply)",
+                        question_type=QuestionType.MULTIPLE_SELECT,
+                        options=[
+                            "Company earnings",
+                            "Market sentiment",
+                            "Interest rates",
+                            "Weather",
+                        ],
+                        correct_answer=[0, 1, 2],
+                        order=3,
+                        explanation="Stock prices are affected by company earnings (financial performance), market sentiment (investor emotions and expectations), and interest rates (affecting borrowing costs and investment attractiveness). Weather generally doesn't directly affect stock prices, though it might indirectly impact certain sectors like agriculture or tourism.",
+                    ),
+                ],
+            },
+            {
+                "title": "Options Trading Quiz",
+                "description": "Test your understanding of options trading concepts",
+                "category": "Options",
+                "questions": [
+                    QuestionBase(
+                        question="What happens to option value as expiration approaches?",
+                        question_type=QuestionType.MULTIPLE_CHOICE,
+                        options=[
+                            "Increases",
+                            "Decreases",
+                            "Stays same",
+                            "Becomes negative",
+                        ],
+                        correct_answer=1,
+                        order=1,
+                        explanation="Option value decreases as expiration approaches due to time decay (theta). The time value component of an option erodes as the expiration date gets closer, especially in the final weeks and days before expiration.",
+                    ),
+                    QuestionBase(
+                        question="You can only exercise American options at expiration.",
+                        question_type=QuestionType.TRUE_FALSE,
+                        options=None,
+                        correct_answer=False,
+                        order=2,
+                        explanation="American options can be exercised at any time before or at expiration, giving holders flexibility. European options, in contrast, can only be exercised at expiration. This difference affects option pricing and trading strategies.",
+                    ),
+                ],
+            },
+            ]
+
+            # Create quizzes
+            for quiz_data in quizzes_data:
+                quiz_create = QuizCreate(
+                    title=quiz_data["title"],
+                    description=quiz_data["description"],
+                    category=quiz_data["category"],
+                    questions=quiz_data["questions"],
+                )
+                create_quiz(db, quiz_create)
+                print(f"✓ Created quiz: {quiz_data['title']}")
+
+            print("\n✅ Quiz data seeded successfully!")
 
     except Exception as e:
         print(f"\n❌ Error seeding data: {e}")
