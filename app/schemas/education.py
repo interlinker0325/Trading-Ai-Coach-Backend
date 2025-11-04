@@ -181,3 +181,190 @@ class QuizAttemptHistory(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# Practice Session Schemas
+class PracticeSessionStatus(str, Enum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+    PAUSED = "paused"
+
+
+class TradeType(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+    STOP_LOSS = "stop_loss"
+    TAKE_PROFIT = "take_profit"
+
+
+class TradeStatus(str, Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
+
+
+class PracticeSessionBase(BaseModel):
+    playbook_id: int
+    symbol: str
+    initial_balance: Optional[float] = 100000.0
+
+
+class PracticeSessionCreate(PracticeSessionBase):
+    playbook_data: Optional[Dict[str, Any]] = None
+
+
+class PracticeSessionUpdate(BaseModel):
+    current_step: Optional[int] = None
+    status: Optional[PracticeSessionStatus] = None
+    current_balance: Optional[float] = None
+    performance_metrics: Optional[Dict[str, Any]] = None
+
+
+class PracticeSessionResponse(PracticeSessionBase):
+    id: int
+    user_id: int
+    playbook_data: Optional[Dict[str, Any]] = None
+    status: PracticeSessionStatus
+    current_step: int
+    initial_balance: float
+    current_balance: float
+    performance_metrics: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    trades: List["PracticeTradeResponse"] = []
+
+    class Config:
+        from_attributes = True
+
+
+# Practice Trade Schemas
+class PracticeTradeBase(BaseModel):
+    trade_type: TradeType
+    symbol: str
+    quantity: float
+    entry_price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+class PracticeTradeCreate(PracticeTradeBase):
+    step_number: int
+
+
+class PracticeTradeUpdate(BaseModel):
+    exit_price: Optional[float] = None
+    status: Optional[TradeStatus] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    pnl: Optional[float] = None
+    pnl_percentage: Optional[float] = None
+
+
+class PracticeTradeResponse(PracticeTradeBase):
+    id: int
+    session_id: int
+    step_number: int
+    exit_price: Optional[float] = None
+    status: TradeStatus
+    pnl: Optional[float] = None
+    pnl_percentage: Optional[float] = None
+    created_at: datetime
+    closed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Update PracticeSessionResponse to include trades (forward reference)
+PracticeSessionResponse.model_rebuild()
+
+
+# Step Completion Schemas
+class StepCompletionRequest(BaseModel):
+    step_number: int
+    actions_taken: Optional[Dict[str, Any]] = None  # Track what user did in this step
+
+
+class StepCompletionResponse(BaseModel):
+    step_number: int
+    completed: bool
+    feedback: Optional[str] = None
+    next_step: Optional[int] = None
+    is_final_step: bool = False
+
+
+# Trade Execution Schemas
+class TradeExecutionRequest(BaseModel):
+    trade_type: TradeType
+    symbol: str
+    quantity: float
+    entry_price: Optional[float] = None  # None = market order (use current price)
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+class TradeExecutionResponse(BaseModel):
+    trade_id: int
+    trade_type: TradeType
+    symbol: str
+    quantity: float
+    entry_price: float
+    status: TradeStatus
+    current_balance: float
+    message: str
+
+
+# Performance Metrics Schema
+class PerformanceMetrics(BaseModel):
+    total_pnl: float
+    total_pnl_percentage: float
+    win_rate: float
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    average_win: Optional[float] = None
+    average_loss: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    current_balance: float
+    initial_balance: float
+
+
+# Playbook Schemas
+class PlaybookStep(BaseModel):
+    step: int
+    title: str
+    description: str
+    details: str
+
+
+class PlaybookBase(BaseModel):
+    title: str
+    description: str
+    category: str
+    level: CourseLevel
+    icon: str
+    steps: List[PlaybookStep]
+
+
+class PlaybookCreate(PlaybookBase):
+    pass
+
+
+class PlaybookUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    level: Optional[CourseLevel] = None
+    icon: Optional[str] = None
+    steps: Optional[List[PlaybookStep]] = None
+
+
+class PlaybookResponse(PlaybookBase):
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

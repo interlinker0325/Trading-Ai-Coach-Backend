@@ -27,6 +27,21 @@ from app.crud.education import (
     get_user_quiz_attempts,
     get_user_best_quiz_score,
     get_user_quiz_attempts_count,
+    get_practice_session,
+    get_practice_sessions,
+    create_practice_session,
+    update_practice_session,
+    delete_practice_session,
+    advance_practice_step,
+    get_practice_trades,
+    execute_trade,
+    close_trade,
+    update_trade,
+    get_playbooks,
+    get_playbook,
+    create_playbook,
+    update_playbook,
+    delete_playbook,
 )
 from app.schemas.education import (
     CourseResponse,
@@ -40,6 +55,18 @@ from app.schemas.education import (
     QuizSubmission,
     QuizResult,
     QuizAttemptHistory,
+    PracticeSessionCreate,
+    PracticeSessionUpdate,
+    PracticeSessionResponse,
+    PracticeTradeResponse,
+    TradeExecutionRequest,
+    TradeExecutionResponse,
+    StepCompletionRequest,
+    StepCompletionResponse,
+    PerformanceMetrics,
+    PlaybookResponse,
+    PlaybookCreate,
+    PlaybookUpdate,
 )
 
 security = HTTPBearer(auto_error=False)
@@ -615,4 +642,388 @@ def delete_quiz_endpoint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found"
         )
+    return None
+
+
+# Practice Session endpoints
+@router.post("/practice/sessions", response_model=PracticeSessionResponse, status_code=status.HTTP_201_CREATED)
+def create_session(
+    session: PracticeSessionCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a new practice session"""
+    try:
+        created = create_practice_session(db, session, current_user.id)
+        return created
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create practice session: {str(e)}"
+        )
+
+
+@router.get("/practice/sessions", response_model=List[PracticeSessionResponse])
+def list_sessions(
+    status: Optional[str] = Query(None, description="Filter by status (active, completed, abandoned, paused)"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get user's practice sessions"""
+    from app.models.education import PracticeSessionStatus
+    
+    status_filter = None
+    if status:
+        try:
+            status_filter = PracticeSessionStatus(status)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status: {status}"
+            )
+    
+    sessions = get_practice_sessions(db, current_user.id, status=status_filter, skip=skip, limit=limit)
+    return sessions
+
+
+@router.get("/practice/sessions/{session_id}", response_model=PracticeSessionResponse)
+def get_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get practice session details"""
+    session = get_practice_session(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    return session
+
+
+@router.put("/practice/sessions/{session_id}", response_model=PracticeSessionResponse)
+def update_session(
+    session_id: int,
+    session_update: PracticeSessionUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update practice session"""
+    updated = update_practice_session(db, session_id, session_update, current_user.id)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    return updated
+
+
+@router.delete("/practice/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Abandon practice session"""
+    if not delete_practice_session(db, session_id, current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    return None
+
+
+@router.post("/practice/sessions/{session_id}/complete-step", response_model=StepCompletionResponse)
+def complete_step(
+    session_id: int,
+    step_completion: StepCompletionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Complete a step and advance to next step"""
+    session = get_practice_session(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    
+    if session.current_step != step_completion.step_number:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Current step is {session.current_step}, not {step_completion.step_number}"
+        )
+    
+    # Get playbook data to determine total steps
+    playbook_data = session.playbook_data or {}
+    steps = playbook_data.get("steps", [])
+    total_steps = len(steps)
+    
+    # Advance to next step
+    updated_session = advance_practice_step(db, session_id, current_user.id)
+    if not updated_session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to advance step"
+        )
+    
+    is_final_step = updated_session.current_step >= total_steps
+    
+    return StepCompletionResponse(
+        step_number=step_completion.step_number,
+        completed=True,
+        feedback="Step completed successfully!",
+        next_step=updated_session.current_step if not is_final_step else None,
+        is_final_step=is_final_step,
+    )
+
+
+@router.get("/practice/sessions/{session_id}/trades", response_model=List[PracticeTradeResponse])
+def list_trades(
+    session_id: int,
+    status: Optional[str] = Query(None, description="Filter by status (open, closed, cancelled)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get trades for a practice session"""
+    # Verify session ownership
+    session = get_practice_session(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    
+    from app.models.education import TradeStatus
+    
+    status_filter = None
+    if status:
+        try:
+            status_filter = TradeStatus(status)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status: {status}"
+            )
+    
+    trades = get_practice_trades(db, session_id, status=status_filter)
+    return trades
+
+
+@router.post("/practice/sessions/{session_id}/trades", response_model=TradeExecutionResponse)
+def execute_trade_endpoint(
+    session_id: int,
+    trade_request: TradeExecutionRequest,
+    current_price: float = Query(..., description="Current market price for the symbol"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Execute a trade in a practice session"""
+    # Verify session ownership
+    session = get_practice_session(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    
+    if session.status.value != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Session is not active (status: {session.status.value})"
+        )
+    
+    try:
+        trade = execute_trade(db, session_id, trade_request, current_price)
+        
+        # Refresh session to get updated balance
+        db.refresh(session)
+        
+        return TradeExecutionResponse(
+            trade_id=trade.id,
+            trade_type=trade.trade_type,
+            symbol=trade.symbol,
+            quantity=trade.quantity,
+            entry_price=trade.entry_price,
+            status=trade.status,
+            current_balance=session.current_balance,
+            message=f"Trade executed successfully at ${trade.entry_price:.2f}",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to execute trade: {str(e)}"
+        )
+
+
+@router.post("/practice/trades/{trade_id}/close", response_model=PracticeTradeResponse)
+def close_trade_endpoint(
+    trade_id: int,
+    exit_price: float = Query(..., description="Exit price for the trade"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Close an open trade"""
+    closed_trade = close_trade(db, trade_id, exit_price, current_user.id)
+    if not closed_trade:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trade not found or cannot be closed"
+        )
+    return closed_trade
+
+
+@router.get("/practice/sessions/{session_id}/performance", response_model=PerformanceMetrics)
+def get_performance(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get performance metrics for a practice session"""
+    session = get_practice_session(db, session_id, current_user.id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Practice session not found"
+        )
+    
+    from app.crud.education import calculate_performance_metrics
+    
+    metrics = calculate_performance_metrics(db, session)
+    
+    return PerformanceMetrics(
+        total_pnl=metrics.get("total_pnl", 0.0),
+        total_pnl_percentage=metrics.get("total_pnl_percentage", 0.0),
+        win_rate=metrics.get("win_rate", 0.0),
+        total_trades=metrics.get("total_trades", 0),
+        winning_trades=metrics.get("winning_trades", 0),
+        losing_trades=metrics.get("losing_trades", 0),
+        average_win=metrics.get("average_win"),
+        average_loss=metrics.get("average_loss"),
+        max_drawdown=metrics.get("max_drawdown"),
+        current_balance=session.current_balance,
+        initial_balance=session.initial_balance,
+    )
+
+
+# Playbooks endpoints
+@router.get("/playbooks", response_model=List[PlaybookResponse])
+def list_playbooks(
+    category: Optional[str] = Query(None, description="Filter by category"),
+    search: Optional[str] = Query(None, description="Search in title, description"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Get all playbooks with optional filtering"""
+    playbooks = get_playbooks(db, category=category, search=search, skip=skip, limit=limit)
+    
+    result = []
+    for playbook in playbooks:
+        playbook_dict = {
+            "id": playbook.id,
+            "title": playbook.title,
+            "description": playbook.description,
+            "category": playbook.category,
+            "level": playbook.level.value,
+            "icon": playbook.icon,
+            "steps": playbook.steps,  # Already JSON array
+            "created_at": playbook.created_at,
+            "updated_at": playbook.updated_at,
+        }
+        result.append(playbook_dict)
+    
+    return result
+
+
+@router.get("/playbooks/{playbook_id}", response_model=PlaybookResponse)
+def get_playbook_detail(
+    playbook_id: int,
+    db: Session = Depends(get_db),
+):
+    """Get playbook by ID"""
+    playbook = get_playbook(db, playbook_id)
+    if not playbook:
+        raise HTTPException(status_code=404, detail="Playbook not found")
+    
+    return {
+        "id": playbook.id,
+        "title": playbook.title,
+        "description": playbook.description,
+        "category": playbook.category,
+        "level": playbook.level.value,
+        "icon": playbook.icon,
+        "steps": playbook.steps,
+        "created_at": playbook.created_at,
+        "updated_at": playbook.updated_at,
+    }
+
+
+@router.post("/playbooks", response_model=PlaybookResponse, status_code=status.HTTP_201_CREATED)
+def create_playbook_endpoint(
+    playbook: PlaybookCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a new playbook (admin only)"""
+    # TODO: Add admin check
+    db_playbook = create_playbook(db, playbook)
+    return {
+        "id": db_playbook.id,
+        "title": db_playbook.title,
+        "description": db_playbook.description,
+        "category": db_playbook.category,
+        "level": db_playbook.level.value,
+        "icon": db_playbook.icon,
+        "steps": db_playbook.steps,
+        "created_at": db_playbook.created_at,
+        "updated_at": db_playbook.updated_at,
+    }
+
+
+@router.put("/playbooks/{playbook_id}", response_model=PlaybookResponse)
+def update_playbook_endpoint(
+    playbook_id: int,
+    playbook_update: PlaybookUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update playbook (admin only)"""
+    # TODO: Add admin check
+    db_playbook = update_playbook(db, playbook_id, playbook_update)
+    if not db_playbook:
+        raise HTTPException(status_code=404, detail="Playbook not found")
+    
+    return {
+        "id": db_playbook.id,
+        "title": db_playbook.title,
+        "description": db_playbook.description,
+        "category": db_playbook.category,
+        "level": db_playbook.level.value,
+        "icon": db_playbook.icon,
+        "steps": db_playbook.steps,
+        "created_at": db_playbook.created_at,
+        "updated_at": db_playbook.updated_at,
+    }
+
+
+@router.delete("/playbooks/{playbook_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_playbook_endpoint(
+    playbook_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete playbook (admin only)"""
+    # TODO: Add admin check
+    deleted = delete_playbook(db, playbook_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Playbook not found")
     return None

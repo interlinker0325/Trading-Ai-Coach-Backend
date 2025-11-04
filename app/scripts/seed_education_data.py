@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.core.database import SessionLocal
-from app.crud.education import create_course, get_courses, create_quiz, get_quizzes
+from app.crud.education import create_course, get_courses, create_quiz, get_quizzes, create_playbook, get_playbooks
 from app.schemas.education import (
     CourseCreate,
     LessonBase,
@@ -18,6 +18,8 @@ from app.schemas.education import (
     QuizCreate,
     QuestionBase,
     QuestionType,
+    PlaybookCreate,
+    PlaybookStep,
 )
 
 
@@ -278,6 +280,257 @@ def seed_education_data():
                 print(f"✓ Created quiz: {quiz_data['title']}")
 
             print("\n✅ Quiz data seeded successfully!")
+
+        # Check if playbooks already exist
+        existing_playbooks = get_playbooks(db, limit=1)
+        if existing_playbooks:
+            print("\n⚠️  Playbooks already exist in database. Skipping playbook seed to avoid duplicates.")
+        else:
+            # Playbooks data
+            playbooks_data = [
+                {
+                    "title": "Day Trading Momentum Strategy",
+                    "description": "Capture intraday momentum moves with entry and exit signals",
+                    "category": "Stocks",
+                    "level": CourseLevel.INTERMEDIATE,
+                    "icon": "TrendingUp",
+                    "steps": [
+                        PlaybookStep(
+                            step=1,
+                            title="Identify High Volume Stocks",
+                            description="Scan for stocks with volume 50% above average",
+                            details="Use a scanner to find stocks trading with significantly higher volume than their 20-day average. This indicates strong institutional interest.",
+                        ),
+                        PlaybookStep(
+                            step=2,
+                            title="Confirm Trend Direction",
+                            description="Verify price is above key moving averages",
+                            details="Check that price is above both 9 EMA and 21 EMA on the 5-minute chart. This confirms bullish momentum.",
+                        ),
+                        PlaybookStep(
+                            step=3,
+                            title="Entry Signal",
+                            description="Buy on pullback to support with bullish candlestick",
+                            details="Wait for price to pull back to the 9 EMA or a key support level, then enter when you see a bullish engulfing or hammer candlestick pattern.",
+                        ),
+                        PlaybookStep(
+                            step=4,
+                            title="Set Stop Loss",
+                            description="Place stop loss below the recent swing low",
+                            details="Set your stop loss 1-2 cents below the most recent swing low to limit downside risk.",
+                        ),
+                        PlaybookStep(
+                            step=5,
+                            title="Take Profit Targets",
+                            description="Scale out at 2:1 and 3:1 risk-reward ratios",
+                            details="Take partial profits at 2R (2x your risk) and let the rest run to 3R or trail stop for larger gains.",
+                        ),
+                    ],
+                },
+                {
+                    "title": "Options Wheel Strategy",
+                    "description": "Generate consistent income through covered calls and cash-secured puts",
+                    "category": "Options",
+                    "level": CourseLevel.INTERMEDIATE,
+                    "icon": "Target",
+                    "steps": [
+                        PlaybookStep(
+                            step=1,
+                            title="Select Quality Underlying",
+                            description="Choose stocks you wouldn't mind owning long-term",
+                            details="Pick stocks with strong fundamentals, good liquidity, and IV rank above 30% for better premium.",
+                        ),
+                        PlaybookStep(
+                            step=2,
+                            title="Sell Cash-Secured Put",
+                            description="Sell puts at strike price 5-10% below current price",
+                            details="Sell puts 30-45 DTE at a strike 5-10% OTM. Aim for 0.5-1% monthly return on capital.",
+                        ),
+                        PlaybookStep(
+                            step=3,
+                            title="Manage Assignment Risk",
+                            description="Roll or take assignment if price approaches strike",
+                            details="If price drops toward your strike, roll down and out for credit. If assigned, move to step 4.",
+                        ),
+                        PlaybookStep(
+                            step=4,
+                            title="Sell Covered Calls",
+                            description="Sell calls above your cost basis",
+                            details="After assignment, sell calls 30-45 DTE at strikes above your cost basis. Target 0.5-1% monthly return.",
+                        ),
+                        PlaybookStep(
+                            step=5,
+                            title="Repeat Cycle",
+                            description="Continue the wheel strategy or close positions",
+                            details="If called away, repeat from step 2. If not, continue selling calls and collect premium.",
+                        ),
+                    ],
+                },
+                {
+                    "title": "Crypto Breakout Strategy",
+                    "description": "Trade cryptocurrency breakouts from consolidation patterns",
+                    "category": "Crypto",
+                    "level": CourseLevel.BEGINNER,
+                    "icon": "Zap",
+                    "steps": [
+                        PlaybookStep(
+                            step=1,
+                            title="Identify Consolidation",
+                            description="Find coins trading in tight ranges for 3-7 days",
+                            details="Look for coins that have been trading sideways in a tight range, forming a base pattern like triangles or rectangles.",
+                        ),
+                        PlaybookStep(
+                            step=2,
+                            title="Watch for Volume Spike",
+                            description="Monitor for sudden volume increase",
+                            details="A breakout with high volume (2-3x average) is more likely to sustain. Low volume breakouts often fail.",
+                        ),
+                        PlaybookStep(
+                            step=3,
+                            title="Enter on Breakout",
+                            description="Buy when price breaks above resistance with volume",
+                            details="Enter a long position when price breaks above the consolidation high with confirming volume. Use a limit order slightly above the breakout level.",
+                        ),
+                        PlaybookStep(
+                            step=4,
+                            title="Set Stop Loss",
+                            description="Place stop below the consolidation low",
+                            details="Set your stop loss just below the consolidation pattern low to protect against false breakouts.",
+                        ),
+                        PlaybookStep(
+                            step=5,
+                            title="Take Profits",
+                            description="Scale out at 1.5x and 2x the pattern height",
+                            details="Calculate the pattern height and take profits at 1.5x and 2x that distance. Trailing stops can capture larger moves.",
+                        ),
+                    ],
+                },
+                {
+                    "title": "Forex Range Trading",
+                    "description": "Profit from currency pairs trading in defined ranges",
+                    "category": "Forex",
+                    "level": CourseLevel.BEGINNER,
+                    "icon": "DollarSign",
+                    "steps": [
+                        PlaybookStep(
+                            step=1,
+                            title="Identify Range Boundaries",
+                            description="Mark clear support and resistance levels",
+                            details="Use horizontal lines to identify clear support (lowest swing low) and resistance (highest swing high) over the last 20-50 candles.",
+                        ),
+                        PlaybookStep(
+                            step=2,
+                            title="Confirm Range is Active",
+                            description="Ensure price respects boundaries multiple times",
+                            details="Price should have bounced off support and resistance at least 2-3 times each. More touches = stronger levels.",
+                        ),
+                        PlaybookStep(
+                            step=3,
+                            title="Buy at Support",
+                            description="Enter long when price reaches support",
+                            details="Wait for price to touch support and show bullish reversal signals (engulfing, hammer, etc.). Enter with a limit order.",
+                        ),
+                        PlaybookStep(
+                            step=4,
+                            title="Sell at Resistance",
+                            description="Take profits when price reaches resistance",
+                            details="Set your take profit just below resistance. Consider taking partial profits at 50% and letting the rest run.",
+                        ),
+                        PlaybookStep(
+                            step=5,
+                            title="Exit on Breakout",
+                            description="Close positions if range breaks",
+                            details="If price breaks above resistance with volume, consider holding for trend continuation. If below support, exit immediately.",
+                        ),
+                    ],
+                },
+                {
+                    "title": "Swing Trading Pullback Strategy",
+                    "description": "Buy quality stocks on pullbacks during uptrends",
+                    "category": "Stocks",
+                    "level": CourseLevel.ADVANCED,
+                    "icon": "BarChart3",
+                    "steps": [
+                        PlaybookStep(
+                            step=1,
+                            title="Identify Uptrending Stock",
+                            description="Find stocks in clear uptrend with higher highs and lows",
+                            details="Look for stocks making higher highs and higher lows on the daily chart. Ensure the 50 SMA is above 200 SMA.",
+                        ),
+                        PlaybookStep(
+                            step=2,
+                            title="Wait for Pullback",
+                            description="Wait for price to pull back to key support",
+                            details="Price should pull back to the 20 EMA, 50 SMA, or a previous support level. Ideal pullback is 5-15%.",
+                        ),
+                        PlaybookStep(
+                            step=3,
+                            title="Confirm Reversal Signal",
+                            description="Look for bullish reversal patterns",
+                            details="Wait for bullish candlestick patterns (hammer, engulfing, doji) or bullish divergence on RSI.",
+                        ),
+                        PlaybookStep(
+                            step=4,
+                            title="Enter Position",
+                            description="Buy on confirmation with proper position sizing",
+                            details="Enter with 50% of position on reversal confirmation. Add remaining 50% on break above recent high.",
+                        ),
+                        PlaybookStep(
+                            step=5,
+                            title="Manage Trade",
+                            description="Trail stop loss and take profits at resistance",
+                            details="Move stop loss to breakeven after 3% gain. Trail stop below recent swing lows. Take profits at key resistance levels.",
+                        ),
+                    ],
+                },
+                {
+                    "title": "Options Iron Condor",
+                    "description": "Neutral strategy to profit from low volatility",
+                    "category": "Options",
+                    "level": CourseLevel.ADVANCED,
+                    "icon": "Target",
+                    "steps": [
+                        PlaybookStep(
+                            step=1,
+                            title="Select High IV Rank Underlying",
+                            description="Choose stocks with IV rank above 50%",
+                            details="Higher IV means higher premiums. Select stocks with IV rank above 50% for better premium collection.",
+                        ),
+                        PlaybookStep(
+                            step=2,
+                            title="Identify Expected Range",
+                            description="Determine where price will likely stay",
+                            details="Use technical analysis to identify support and resistance. Price should stay within this range for the trade duration.",
+                        ),
+                        PlaybookStep(
+                            step=3,
+                            title="Sell Call Spread",
+                            description="Sell OTM call spread above current price",
+                            details="Sell a call spread 30-45 DTE with strikes above resistance. Aim for 1/3 the width of the spread in premium.",
+                        ),
+                        PlaybookStep(
+                            step=4,
+                            title="Sell Put Spread",
+                            description="Sell OTM put spread below current price",
+                            details="Sell a put spread with strikes below support. Same DTE and premium target as call spread.",
+                        ),
+                        PlaybookStep(
+                            step=5,
+                            title="Manage and Close",
+                            description="Close at 50% profit or 21 DTE",
+                            details="Close the entire position when you've collected 50% of max profit, or when 21 DTE remains. Roll if one side is threatened.",
+                        ),
+                    ],
+                },
+            ]
+
+            # Create playbooks
+            for playbook_data in playbooks_data:
+                playbook_create = PlaybookCreate(**playbook_data)
+                create_playbook(db, playbook_create)
+                print(f"✓ Created playbook: {playbook_data['title']}")
+
+            print("\n✅ Playbook data seeded successfully!")
 
     except Exception as e:
         print(f"\n❌ Error seeding data: {e}")

@@ -6,4 +6,10 @@ from app.models.education import (
     Lesson,
     UserCourseProgress,
     UserLessonProgress,
+    Quiz,
+    Question,
+    UserQuizAttempt,
+    PracticeSession,
+    PracticeTrade,
+    Playbook,
 )

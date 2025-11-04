@@ -9,6 +9,9 @@ from app.models.education import (
     Quiz,
     Question,
     UserQuizAttempt,
+    PracticeSession,
+    PracticeTrade,
+    Playbook,
 )
 from app.schemas.education import (
     CourseCreate,
@@ -19,7 +22,16 @@ from app.schemas.education import (
     QuizUpdate,
     QuestionCreate,
     QuizSubmission,
+    PracticeSessionCreate,
+    PracticeSessionUpdate,
+    PracticeTradeCreate,
+    PracticeTradeUpdate,
+    TradeExecutionRequest,
+    PlaybookCreate,
+    PlaybookUpdate,
 )
+from datetime import datetime
+from app.models.education import PracticeSessionStatus, TradeStatus, TradeType
 
 
 # Course CRUD
@@ -433,3 +445,384 @@ def get_user_quiz_attempts_count(db: Session, user_id: int, quiz_id: int) -> int
         )
         .scalar()
     ) or 0
+
+
+# Practice Session CRUD
+def get_practice_session(db: Session, session_id: int, user_id: Optional[int] = None) -> Optional[PracticeSession]:
+    """Get practice session by ID, optionally filtered by user"""
+    query = db.query(PracticeSession).filter(PracticeSession.id == session_id)
+    if user_id:
+        query = query.filter(PracticeSession.user_id == user_id)
+    return query.first()
+
+
+def get_practice_sessions(
+    db: Session,
+    user_id: int,
+    status: Optional[PracticeSessionStatus] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[PracticeSession]:
+    """Get user's practice sessions with optional filtering"""
+    query = db.query(PracticeSession).filter(PracticeSession.user_id == user_id)
+    
+    if status:
+        query = query.filter(PracticeSession.status == status)
+    
+    return query.order_by(PracticeSession.created_at.desc()).offset(skip).limit(limit).all()
+
+
+def create_practice_session(db: Session, session: PracticeSessionCreate, user_id: int) -> PracticeSession:
+    """Create a new practice session"""
+    db_session = PracticeSession(
+        user_id=user_id,
+        playbook_id=session.playbook_id,
+        playbook_data=session.playbook_data,
+        symbol=session.symbol,
+        initial_balance=session.initial_balance or 100000.0,
+        current_balance=session.initial_balance or 100000.0,
+        status=PracticeSessionStatus.ACTIVE,
+        current_step=1,
+    )
+    db.add(db_session)
+    db.commit()
+    db.refresh(db_session)
+    return db_session
+
+
+def update_practice_session(
+    db: Session,
+    session_id: int,
+    session_update: PracticeSessionUpdate,
+    user_id: Optional[int] = None,
+) -> Optional[PracticeSession]:
+    """Update practice session"""
+    query = db.query(PracticeSession).filter(PracticeSession.id == session_id)
+    if user_id:
+        query = query.filter(PracticeSession.user_id == user_id)
+    
+    db_session = query.first()
+    if not db_session:
+        return None
+    
+    update_data = session_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_session, field, value)
+    
+    # If completing session, set completed_at
+    if update_data.get("status") == PracticeSessionStatus.COMPLETED and not db_session.completed_at:
+        db_session.completed_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(db_session)
+    return db_session
+
+
+def delete_practice_session(db: Session, session_id: int, user_id: Optional[int] = None) -> bool:
+    """Delete practice session (or mark as abandoned)"""
+    query = db.query(PracticeSession).filter(PracticeSession.id == session_id)
+    if user_id:
+        query = query.filter(PracticeSession.user_id == user_id)
+    
+    db_session = query.first()
+    if not db_session:
+        return False
+    
+    # Mark as abandoned instead of deleting
+    db_session.status = PracticeSessionStatus.ABANDONED
+    db.commit()
+    return True
+
+
+def advance_practice_step(db: Session, session_id: int, user_id: int) -> Optional[PracticeSession]:
+    """Advance to next step in practice session"""
+    db_session = get_practice_session(db, session_id, user_id)
+    if not db_session or db_session.status != PracticeSessionStatus.ACTIVE:
+        return None
+    
+    # Get playbook data to determine total steps
+    playbook_data = db_session.playbook_data or {}
+    steps = playbook_data.get("steps", [])
+    total_steps = len(steps)
+    
+    if db_session.current_step < total_steps:
+        db_session.current_step += 1
+    else:
+        # Completed all steps
+        db_session.status = PracticeSessionStatus.COMPLETED
+        db_session.completed_at = datetime.utcnow()
+        # Calculate final performance metrics
+        db_session.performance_metrics = calculate_performance_metrics(db, db_session)
+    
+    db.commit()
+    db.refresh(db_session)
+    return db_session
+
+
+def calculate_performance_metrics(db: Session, session: PracticeSession) -> dict:
+    """Calculate performance metrics for a session"""
+    trades = db.query(PracticeTrade).filter(
+        PracticeTrade.session_id == session.id,
+        PracticeTrade.status == TradeStatus.CLOSED,
+    ).all()
+    
+    if not trades:
+        return {
+            "total_pnl": 0.0,
+            "total_pnl_percentage": 0.0,
+            "win_rate": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+        }
+    
+    total_pnl = sum(trade.pnl or 0.0 for trade in trades)
+    total_pnl_percentage = ((session.current_balance - session.initial_balance) / session.initial_balance) * 100
+    
+    winning_trades = [t for t in trades if t.pnl and t.pnl > 0]
+    losing_trades = [t for t in trades if t.pnl and t.pnl < 0]
+    
+    win_rate = (len(winning_trades) / len(trades)) * 100 if trades else 0.0
+    
+    average_win = sum(t.pnl for t in winning_trades) / len(winning_trades) if winning_trades else None
+    average_loss = sum(t.pnl for t in losing_trades) / len(losing_trades) if losing_trades else None
+    
+    # Calculate max drawdown
+    balance_history = [session.initial_balance]
+    for trade in sorted(trades, key=lambda x: x.created_at):
+        if trade.pnl:
+            balance_history.append(balance_history[-1] + trade.pnl)
+    
+    if len(balance_history) > 1:
+        peak = balance_history[0]
+        max_drawdown = 0.0
+        for balance in balance_history:
+            if balance > peak:
+                peak = balance
+            drawdown = ((peak - balance) / peak) * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+    else:
+        max_drawdown = None
+    
+    return {
+        "total_pnl": total_pnl,
+        "total_pnl_percentage": total_pnl_percentage,
+        "win_rate": win_rate,
+        "total_trades": len(trades),
+        "winning_trades": len(winning_trades),
+        "losing_trades": len(losing_trades),
+        "average_win": average_win,
+        "average_loss": average_loss,
+        "max_drawdown": max_drawdown,
+    }
+
+
+# Practice Trade CRUD
+def get_practice_trade(db: Session, trade_id: int) -> Optional[PracticeTrade]:
+    """Get practice trade by ID"""
+    return db.query(PracticeTrade).filter(PracticeTrade.id == trade_id).first()
+
+
+def get_practice_trades(
+    db: Session,
+    session_id: int,
+    status: Optional[TradeStatus] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[PracticeTrade]:
+    """Get trades for a practice session"""
+    query = db.query(PracticeTrade).filter(PracticeTrade.session_id == session_id)
+    
+    if status:
+        query = query.filter(PracticeTrade.status == status)
+    
+    return query.order_by(PracticeTrade.created_at.desc()).offset(skip).limit(limit).all()
+
+
+def execute_trade(
+    db: Session,
+    session_id: int,
+    trade_request: TradeExecutionRequest,
+    current_price: float,
+) -> PracticeTrade:
+    """Execute a trade in a practice session"""
+    session = get_practice_session(db, session_id)
+    if not session or session.status != PracticeSessionStatus.ACTIVE:
+        raise ValueError("Session not found or not active")
+    
+    # Use current_price if entry_price not provided (market order)
+    entry_price = trade_request.entry_price or current_price
+    
+    # Calculate cost
+    cost = entry_price * trade_request.quantity
+    
+    # Check if user has enough balance for buy orders
+    if trade_request.trade_type == TradeType.BUY:
+        if session.current_balance < cost:
+            raise ValueError("Insufficient balance")
+        session.current_balance -= cost
+    elif trade_request.trade_type == TradeType.SELL:
+        # For sell orders, we need to check if user has open positions
+        # Simplified: just add to balance
+        session.current_balance += cost
+    
+    # Create trade
+    db_trade = PracticeTrade(
+        session_id=session_id,
+        step_number=session.current_step,
+        trade_type=trade_request.trade_type,
+        symbol=trade_request.symbol,
+        quantity=trade_request.quantity,
+        entry_price=entry_price,
+        stop_loss=trade_request.stop_loss,
+        take_profit=trade_request.take_profit,
+        status=TradeStatus.OPEN,
+    )
+    
+    db.add(db_trade)
+    db.commit()
+    db.refresh(db_trade)
+    return db_trade
+
+
+def close_trade(
+    db: Session,
+    trade_id: int,
+    exit_price: float,
+    user_id: Optional[int] = None,
+) -> Optional[PracticeTrade]:
+    """Close a trade"""
+    db_trade = get_practice_trade(db, trade_id)
+    if not db_trade or db_trade.status != TradeStatus.OPEN:
+        return None
+    
+    # Verify session ownership if user_id provided
+    if user_id:
+        session = get_practice_session(db, db_trade.session_id, user_id)
+        if not session:
+            return None
+    
+    # Calculate P&L
+    if db_trade.trade_type == TradeType.BUY:
+        pnl = (exit_price - db_trade.entry_price) * db_trade.quantity
+    else:  # SELL
+        pnl = (db_trade.entry_price - exit_price) * db_trade.quantity
+    
+    pnl_percentage = ((exit_price - db_trade.entry_price) / db_trade.entry_price) * 100
+    
+    # Update trade
+    db_trade.exit_price = exit_price
+    db_trade.pnl = pnl
+    db_trade.pnl_percentage = pnl_percentage
+    db_trade.status = TradeStatus.CLOSED
+    db_trade.closed_at = datetime.utcnow()
+    
+    # Update session balance
+    session = get_practice_session(db, db_trade.session_id)
+    if session:
+        session.current_balance += pnl
+    
+    db.commit()
+    db.refresh(db_trade)
+    return db_trade
+
+
+def update_trade(
+    db: Session,
+    trade_id: int,
+    trade_update: PracticeTradeUpdate,
+) -> Optional[PracticeTrade]:
+    """Update trade (e.g., modify stop loss/take profit)"""
+    db_trade = get_practice_trade(db, trade_id)
+    if not db_trade:
+        return None
+    
+    update_data = trade_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_trade, field, value)
+    
+    db.commit()
+    db.refresh(db_trade)
+    return db_trade
+
+
+# Playbook CRUD
+def get_playbook(db: Session, playbook_id: int) -> Optional[Playbook]:
+    """Get playbook by ID"""
+    return db.query(Playbook).filter(Playbook.id == playbook_id).first()
+
+
+def get_playbooks(
+    db: Session,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[Playbook]:
+    """Get all playbooks with optional filtering"""
+    query = db.query(Playbook)
+
+    if category:
+        query = query.filter(Playbook.category.ilike(f"%{category}%"))
+
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (Playbook.title.ilike(search_term))
+            | (Playbook.description.ilike(search_term))
+        )
+
+    return query.order_by(Playbook.created_at.desc()).offset(skip).limit(limit).all()
+
+
+def create_playbook(db: Session, playbook: PlaybookCreate) -> Playbook:
+    """Create a new playbook"""
+    # Convert steps to JSON format
+    steps_json = [step.model_dump() for step in playbook.steps]
+    
+    db_playbook = Playbook(
+        title=playbook.title,
+        description=playbook.description,
+        category=playbook.category,
+        level=playbook.level,
+        icon=playbook.icon,
+        steps=steps_json,
+    )
+    db.add(db_playbook)
+    db.commit()
+    db.refresh(db_playbook)
+    return db_playbook
+
+
+def update_playbook(
+    db: Session, playbook_id: int, playbook_update: PlaybookUpdate
+) -> Optional[Playbook]:
+    """Update playbook"""
+    db_playbook = get_playbook(db, playbook_id)
+    if not db_playbook:
+        return None
+
+    update_data = playbook_update.model_dump(exclude_unset=True)
+    
+    # Convert steps to JSON if provided
+    if "steps" in update_data and update_data["steps"] is not None:
+        update_data["steps"] = [step.model_dump() for step in update_data["steps"]]
+    
+    for field, value in update_data.items():
+        setattr(db_playbook, field, value)
+
+    db.commit()
+    db.refresh(db_playbook)
+    return db_playbook
+
+
+def delete_playbook(db: Session, playbook_id: int) -> bool:
+    """Delete playbook"""
+    db_playbook = get_playbook(db, playbook_id)
+    if not db_playbook:
+        return False
+
+    db.delete(db_playbook)
+    db.commit()
+    return True

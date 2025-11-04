@@ -162,3 +162,94 @@ CREATE INDEX idx_user_quiz_attempts_completed_at ON user_quiz_attempts(completed
 -- Create trigger for updated_at on quizzes
 CREATE TRIGGER update_quizzes_updated_at BEFORE UPDATE ON quizzes
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Create ENUM types for practice sessions
+DO $$ BEGIN
+    CREATE TYPE practice_session_status_enum AS ENUM ('active', 'completed', 'abandoned', 'paused');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE trade_type_enum AS ENUM ('buy', 'sell', 'stop_loss', 'take_profit');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE trade_status_enum AS ENUM ('open', 'closed', 'cancelled');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- Table: practice_sessions
+CREATE TABLE practice_sessions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    playbook_id INTEGER NOT NULL,
+    playbook_data JSONB,
+    symbol VARCHAR NOT NULL,
+    status practice_session_status_enum NOT NULL DEFAULT 'active',
+    current_step INTEGER DEFAULT 1,
+    initial_balance DOUBLE PRECISION NOT NULL DEFAULT 100000.0,
+    current_balance DOUBLE PRECISION NOT NULL DEFAULT 100000.0,
+    performance_metrics JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT fk_practice_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_practice_sessions_user_id ON practice_sessions(user_id);
+CREATE INDEX idx_practice_sessions_status ON practice_sessions(status);
+CREATE INDEX idx_practice_sessions_playbook_id ON practice_sessions(playbook_id);
+CREATE INDEX idx_practice_sessions_created_at ON practice_sessions(created_at DESC);
+
+-- Table: practice_trades
+CREATE TABLE practice_trades (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    step_number INTEGER NOT NULL,
+    trade_type trade_type_enum NOT NULL,
+    symbol VARCHAR NOT NULL,
+    quantity DOUBLE PRECISION NOT NULL,
+    entry_price DOUBLE PRECISION NOT NULL,
+    exit_price DOUBLE PRECISION,
+    stop_loss DOUBLE PRECISION,
+    take_profit DOUBLE PRECISION,
+    status trade_status_enum NOT NULL DEFAULT 'open',
+    pnl DOUBLE PRECISION,
+    pnl_percentage DOUBLE PRECISION,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT fk_practice_trades_session FOREIGN KEY (session_id) REFERENCES practice_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_practice_trades_session_id ON practice_trades(session_id);
+CREATE INDEX idx_practice_trades_status ON practice_trades(status);
+CREATE INDEX idx_practice_trades_step_number ON practice_trades(session_id, step_number);
+CREATE INDEX idx_practice_trades_created_at ON practice_trades(created_at DESC);
+
+-- Create trigger for updated_at on practice_sessions
+CREATE TRIGGER update_practice_sessions_updated_at BEFORE UPDATE ON practice_sessions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Table: playbooks
+CREATE TABLE playbooks (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR NOT NULL,
+    description TEXT NOT NULL,
+    category VARCHAR NOT NULL,
+    level course_level_enum NOT NULL,
+    icon VARCHAR NOT NULL,
+    steps JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_playbooks_title ON playbooks(title);
+CREATE INDEX idx_playbooks_category ON playbooks(category);
+
+-- Create trigger for updated_at on playbooks
+CREATE TRIGGER update_playbooks_updated_at BEFORE UPDATE ON playbooks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
