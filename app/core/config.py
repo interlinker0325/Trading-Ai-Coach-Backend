@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     resend_api_key: str = os.getenv("RESEND_API_KEY")
     
     # CORS
-    cors_origins: List[str] = ["https://trading-furu-plus.vercel.app", "http://localhost:3000"]
+    cors_origins: List[str] = ["https://furuplus.com", "http://localhost:3000"]
     
     print("cors_origins", cors_origins)
     

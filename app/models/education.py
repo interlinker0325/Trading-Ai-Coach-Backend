@@ -281,3 +281,26 @@ class Playbook(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+    # Relationships
+    user_progress = relationship("UserPlaybookProgress", back_populates="playbook", cascade="all, delete-orphan")
+
+
+class UserPlaybookProgress(Base):
+    __tablename__ = "user_playbook_progress"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    playbook_id = Column(Integer, ForeignKey("playbooks.id"), nullable=False, index=True)
+    completed = Column(Boolean, default=False)
+    last_completed_step = Column(Integer, nullable=True)  # Track partial progress (1-indexed)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relationships
+    user = relationship("User", backref="playbook_progress")
+    playbook = relationship("Playbook", back_populates="user_progress")
+
+    # Unique constraint: one progress record per user per playbook
+    __table_args__ = (UniqueConstraint('user_id', 'playbook_id', name='uq_user_playbook_progress'),)
+

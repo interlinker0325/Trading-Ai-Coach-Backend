@@ -365,6 +365,7 @@ class PlaybookResponse(PlaybookBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
+    completed: Optional[bool] = None  # User-specific completion status
 
     class Config:
         from_attributes = True

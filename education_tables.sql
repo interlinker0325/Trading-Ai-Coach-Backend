@@ -253,3 +253,26 @@ CREATE INDEX idx_playbooks_category ON playbooks(category);
 -- Create trigger for updated_at on playbooks
 CREATE TRIGGER update_playbooks_updated_at BEFORE UPDATE ON playbooks
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Table: user_playbook_progress
+CREATE TABLE user_playbook_progress (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    playbook_id INTEGER NOT NULL,
+    completed BOOLEAN NOT NULL DEFAULT FALSE,
+    last_completed_step INTEGER,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT fk_user_playbook_progress_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_user_playbook_progress_playbook FOREIGN KEY (playbook_id) REFERENCES playbooks(id) ON DELETE CASCADE,
+    CONSTRAINT uq_user_playbook_progress UNIQUE (user_id, playbook_id)
+);
+
+CREATE INDEX idx_user_playbook_progress_user_id ON user_playbook_progress(user_id);
+CREATE INDEX idx_user_playbook_progress_playbook_id ON user_playbook_progress(playbook_id);
+CREATE INDEX idx_user_playbook_progress_completed ON user_playbook_progress(completed);
+
+-- Create trigger for updated_at on user_playbook_progress
+CREATE TRIGGER update_user_playbook_progress_updated_at BEFORE UPDATE ON user_playbook_progress
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

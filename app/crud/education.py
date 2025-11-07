@@ -12,6 +12,7 @@ from app.models.education import (
     PracticeSession,
     PracticeTrade,
     Playbook,
+    UserPlaybookProgress,
 )
 from app.schemas.education import (
     CourseCreate,
@@ -536,6 +537,8 @@ def delete_practice_session(db: Session, session_id: int, user_id: Optional[int]
 
 def advance_practice_step(db: Session, session_id: int, user_id: int) -> Optional[PracticeSession]:
     """Advance to next step in practice session"""
+    from datetime import datetime
+    
     db_session = get_practice_session(db, session_id, user_id)
     if not db_session or db_session.status != PracticeSessionStatus.ACTIVE:
         return None
@@ -544,6 +547,9 @@ def advance_practice_step(db: Session, session_id: int, user_id: int) -> Optiona
     playbook_data = db_session.playbook_data or {}
     steps = playbook_data.get("steps", [])
     total_steps = len(steps)
+    
+    # Track the step that was just completed (before advancing)
+    completed_step = db_session.current_step
     
     if db_session.current_step < total_steps:
         db_session.current_step += 1
@@ -556,6 +562,12 @@ def advance_practice_step(db: Session, session_id: int, user_id: int) -> Optiona
     
     db.commit()
     db.refresh(db_session)
+    
+    # Update user playbook progress
+    update_user_playbook_progress(
+        db, db_session.playbook_id, user_id, completed_step, total_steps
+    )
+    
     return db_session
 
 
@@ -826,3 +838,66 @@ def delete_playbook(db: Session, playbook_id: int) -> bool:
     db.delete(db_playbook)
     db.commit()
     return True
+
+
+def check_playbook_completion(db: Session, playbook_id: int, user_id: int) -> bool:
+    """Check if user has completed a playbook"""
+    progress = (
+        db.query(UserPlaybookProgress)
+        .filter(
+            UserPlaybookProgress.playbook_id == playbook_id,
+            UserPlaybookProgress.user_id == user_id,
+        )
+        .first()
+    )
+    return progress is not None and progress.completed
+
+
+def get_user_playbook_progress(
+    db: Session, playbook_id: int, user_id: int
+) -> Optional[UserPlaybookProgress]:
+    """Get user's progress for a playbook"""
+    return (
+        db.query(UserPlaybookProgress)
+        .filter(
+            UserPlaybookProgress.playbook_id == playbook_id,
+            UserPlaybookProgress.user_id == user_id,
+        )
+        .first()
+    )
+
+
+def update_user_playbook_progress(
+    db: Session,
+    playbook_id: int,
+    user_id: int,
+    completed_step: int,
+    total_steps: int,
+) -> UserPlaybookProgress:
+    """Update or create user playbook progress"""
+    from datetime import datetime
+    
+    progress = get_user_playbook_progress(db, playbook_id, user_id)
+    
+    if not progress:
+        # Create new progress record
+        progress = UserPlaybookProgress(
+            user_id=user_id,
+            playbook_id=playbook_id,
+            completed=False,
+            last_completed_step=completed_step,
+        )
+        db.add(progress)
+    else:
+        # Update existing progress
+        progress.last_completed_step = completed_step
+    
+    # Check if all steps are completed
+    if completed_step >= total_steps:
+        progress.completed = True
+        if not progress.completed_at:
+            progress.completed_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(progress)
+    return progress

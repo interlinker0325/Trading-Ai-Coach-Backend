@@ -42,6 +42,7 @@ from app.crud.education import (
     create_playbook,
     update_playbook,
     delete_playbook,
+    check_playbook_completion,
 )
 from app.schemas.education import (
     CourseResponse,
@@ -922,6 +923,7 @@ def list_playbooks(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Get all playbooks with optional filtering"""
     playbooks = get_playbooks(db, category=category, search=search, skip=skip, limit=limit)
@@ -938,7 +940,13 @@ def list_playbooks(
             "steps": playbook.steps,  # Already JSON array
             "created_at": playbook.created_at,
             "updated_at": playbook.updated_at,
+            "completed": None,
         }
+        # Check completion status if user is authenticated
+        if current_user:
+            playbook_dict["completed"] = check_playbook_completion(
+                db, playbook.id, current_user.id
+            )
         result.append(playbook_dict)
     
     return result
@@ -948,13 +956,14 @@ def list_playbooks(
 def get_playbook_detail(
     playbook_id: int,
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """Get playbook by ID"""
     playbook = get_playbook(db, playbook_id)
     if not playbook:
         raise HTTPException(status_code=404, detail="Playbook not found")
     
-    return {
+    playbook_dict = {
         "id": playbook.id,
         "title": playbook.title,
         "description": playbook.description,
@@ -964,7 +973,16 @@ def get_playbook_detail(
         "steps": playbook.steps,
         "created_at": playbook.created_at,
         "updated_at": playbook.updated_at,
+        "completed": None,
     }
+    
+    # Check completion status if user is authenticated
+    if current_user:
+        playbook_dict["completed"] = check_playbook_completion(
+            db, playbook.id, current_user.id
+        )
+    
+    return playbook_dict
 
 
 @router.post("/playbooks", response_model=PlaybookResponse, status_code=status.HTTP_201_CREATED)
