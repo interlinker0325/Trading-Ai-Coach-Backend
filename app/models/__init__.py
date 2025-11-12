@@ -13,3 +13,10 @@ from app.models.education import (
     PracticeTrade,
     Playbook,
 )
+from app.models.backtest import (
+    BacktestStrategy,
+    BacktestResult,
+    BacktestTrade,
+    BacktestStatus,
+    AssetType,
+)
