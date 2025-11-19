@@ -49,7 +49,7 @@ class PolygonService:
         """
         
         try:
-            ticker_details_url = f"https://api.polygon.io/v3/reference/tickers/{ticker}"
+            ticker_details_url = f"https://api.massive.com/v3/reference/tickers/{ticker}"
             ticker_details_data = await self._make_request(ticker_details_url, "stocks")
         
             if type == "stock":
@@ -81,7 +81,7 @@ class PolygonService:
         Get dividend yield data from Polygon API
         """
         try:
-            dividends_url = f"https://api.polygon.io/v3/reference/dividends?ticker={ticker}"
+            dividends_url = f"https://api.massive.com/v3/reference/dividends?ticker={ticker}"
             dividends_data = await self._make_request(dividends_url, "stocks")
             dividends = dividends_data.get("results", [])
             
@@ -137,7 +137,7 @@ class PolygonService:
             # Apply search filter if provided
             if search:
                 search = search.upper()
-                snapshot_url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{search}"
+                snapshot_url = f"https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/{search}"
                 snapshot_data = await self._make_request(snapshot_url, "stocks")
                 snapshot_data = snapshot_data.get("ticker", {})
         
@@ -155,7 +155,7 @@ class PolygonService:
                     **dividend_yield_data,
                 })
             else:    
-                snapshot_url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+                snapshot_url = "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers"
                 snapshot_data = await self._make_request(snapshot_url, "stocks");
                 snapshot_data = snapshot_data.get("tickers", [])
         
@@ -209,7 +209,7 @@ class PolygonService:
 
             if search:
                 search = f"X:{search.upper()}"
-                snapshot_url = f"https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers/{search}"
+                snapshot_url = f"https://api.massive.com/v2/snapshot/locale/global/markets/crypto/tickers/{search}"
                 snapshot_data = await self._make_request(snapshot_url, "crypto");
                 snapshot_data = snapshot_data.get("ticker", {})
 
@@ -225,7 +225,7 @@ class PolygonService:
                     **crypto_snapshot_data,
                 })   
             else:
-                snapshot_url = "https://api.polygon.io/v2/snapshot/locale/global/markets/crypto/tickers"
+                snapshot_url = "https://api.massive.com/v2/snapshot/locale/global/markets/crypto/tickers"
                 snapshot_data = await self._make_request(snapshot_url, "crypto");
                 snapshot_data = snapshot_data.get("tickers", [])
             
@@ -274,7 +274,7 @@ class PolygonService:
             current_page_results = []
             if search:
                 search = f"C:{search.upper()}"
-                snapshot_url = f"https://api.polygon.io/v2/snapshot/locale/global/markets/forex/tickers/{search}"
+                snapshot_url = f"https://api.massive.com/v2/snapshot/locale/global/markets/forex/tickers/{search}"
                 snapshot_data = await self._make_request(snapshot_url, "forex");
                 snapshot_data = snapshot_data.get("ticker", {})        
 
@@ -290,7 +290,7 @@ class PolygonService:
                     **forex_snapshot_data,
                 })   
             else:
-                snapshot_url = "https://api.polygon.io/v2/snapshot/locale/global/markets/forex/tickers"
+                snapshot_url = "https://api.massive.com/v2/snapshot/locale/global/markets/forex/tickers"
                 snapshot_data = await self._make_request(snapshot_url, "forex");
                 snapshot_data = snapshot_data.get("tickers", [])
                 print(f"Total forex in snapshot: {len(snapshot_data)}")
@@ -346,7 +346,7 @@ class PolygonService:
 
             if search:
                 search = search.upper()
-                snapshot_url = f"https://api.polygon.io/v3/snapshot/options/{search}?order=asc&limit={limit}&sort=ticker"
+                snapshot_url = f"https://api.massive.com/v3/snapshot/options/{search}?order=asc&limit={limit}&sort=ticker"
                 while snapshot_url:
                     snapshot_data = await self._make_request(snapshot_url, "options");
                     snapshot_url = snapshot_data.get("next_url", None)

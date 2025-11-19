@@ -24,9 +24,17 @@ Base = declarative_base()
 
 
 def get_db():
-    """Dependency to get database session"""
+    """Dependency to get database session (for FastAPI dependency injection)"""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def get_db_session():
+    """
+    Get a database session for use in Celery tasks or other non-FastAPI contexts.
+    Returns a session that must be closed manually.
+    """
+    return SessionLocal()

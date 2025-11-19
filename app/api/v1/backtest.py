@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.database import get_db
@@ -14,10 +14,9 @@ from app.schemas.backtest import (
     BacktestTradeResponse,
     BacktestRunRequest,
     BacktestRunResponse,
-    NaturalLanguageBacktestRequest,
 )
 from app.models.backtest import BacktestStatus
-from app.services.backtest_service import BacktestService
+from app.tasks.backtest import run_backtest_task
 
 router = APIRouter()
 
@@ -96,11 +95,11 @@ def delete_strategy(
 @router.post("/run", response_model=BacktestRunResponse, status_code=status.HTTP_202_ACCEPTED)
 def run_backtest(
     request: BacktestRunRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Run a backtest (creates strategy if needed, then runs backtest)"""
+    from app.services.backtest_service import BacktestService
     backtest_service = BacktestService(db)
     
     # If strategy_id provided, use existing strategy
@@ -127,11 +126,9 @@ def run_backtest(
     
     # Run backtest (async or sync)
     if request.run_async:
-        # For async background tasks, we need to wrap it properly
-        async def run_backtest_task():
-            await backtest_service.run_backtest(strategy.id, result.id)
+        # Use Celery for async execution
+        celery_task = run_backtest_task.delay(strategy.id, result.id)
         
-        background_tasks.add_task(run_backtest_task)
         return BacktestRunResponse(
             result_id=result.id,
             status=BacktestStatus.PENDING,
@@ -154,51 +151,6 @@ def run_backtest(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Backtest failed: {str(e)}"
             )
-
-
-@router.post("/run/ai", response_model=BacktestRunResponse, status_code=status.HTTP_202_ACCEPTED)
-def run_ai_backtest(
-    request: NaturalLanguageBacktestRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Run a backtest from natural language query using AI"""
-    backtest_service = BacktestService(db)
-    
-    # Use AI to parse natural language and create strategy
-    strategy = backtest_service.create_strategy_from_natural_language(
-        request.query,
-        current_user.id,
-        symbol=request.symbol,
-        start_date=request.start_date,
-        end_date=request.end_date,
-        initial_capital=request.initial_capital
-    )
-    
-    if not strategy:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to parse natural language query. Please provide a clearer strategy description."
-        )
-    
-    # Create result record
-    result = crud.create_backtest_result(
-        db, strategy.id, current_user.id, BacktestStatus.PENDING
-    )
-    
-    # Run backtest in background
-    async def run_backtest_task():
-        await backtest_service.run_backtest(strategy.id, result.id)
-    
-    background_tasks.add_task(run_backtest_task)
-    
-    return BacktestRunResponse(
-        result_id=result.id,
-        status=BacktestStatus.PENDING,
-        message="AI backtest started. Check status using the result_id.",
-        estimated_completion_time=300
-    )
 
 
 # Result Endpoints

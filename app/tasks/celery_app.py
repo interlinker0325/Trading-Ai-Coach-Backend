@@ -5,7 +5,7 @@ celery_app = Celery(
     "furu_ai",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.email", "app.tasks.ai_processing"]
+    include=["app.tasks.email", "app.tasks.ai_processing", "app.tasks.backtest"]
 )
 
 # Celery configuration

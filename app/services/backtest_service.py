@@ -1,13 +1,11 @@
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
-from app.models.backtest import BacktestStrategy, BacktestResult, BacktestStatus, AssetType
+from app.models.backtest import BacktestStrategy, BacktestStatus
 from app.crud import backtest as crud
 from app.services.polygon_service import PolygonService
-from app.core.config import settings
-from openai import OpenAI
-import json
 import math
+import json
 
 
 class BacktestService:
@@ -16,267 +14,6 @@ class BacktestService:
     def __init__(self, db: Session):
         self.db = db
         self.polygon_service = PolygonService()
-        self.openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
-    
-    def create_strategy_from_natural_language(
-        self,
-        query: str,
-        user_id: int,
-        symbol: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        initial_capital: float = 100000.0
-    ) -> Optional[BacktestStrategy]:
-        """
-        Parse natural language query using AI and create a strategy.
-        
-        Example queries:
-        - "Backtest buying AAPL when RSI < 30, sell when RSI > 70, last 5 years with 2% position sizing and 5% stop loss"
-        - "Test a MACD crossover strategy on BTC/USD for the past year with 10% take profit"
-        - "Backtest gold when price crosses above SMA(50), exit when price crosses below SMA(50), last 3 years"
-        """
-        if not self.openai_client:
-            print("OpenAI API key not configured. Cannot parse natural language queries.")
-            return None
-        
-        try:
-            # Parse the query with AI
-            parsed_strategy = self._parse_natural_language_with_ai(
-                query,
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                initial_capital=initial_capital
-            )
-            
-            if not parsed_strategy:
-                return None
-            
-            # Create strategy name if not provided
-            strategy_name = parsed_strategy.get("name") or f"AI Strategy: {query[:50]}..."
-            
-            # Create the strategy in database
-            strategy_data = {
-                "name": strategy_name,
-                "symbol": parsed_strategy["symbol"],
-                "asset_type": AssetType(parsed_strategy["asset_type"]),
-                "timeframe": parsed_strategy["timeframe"],
-                "start_date": parsed_strategy["start_date"],
-                "end_date": parsed_strategy["end_date"],
-                "initial_capital": parsed_strategy.get("initial_capital", initial_capital),
-                "indicators": parsed_strategy.get("indicators", []),
-                "entry_rules": parsed_strategy.get("entry_rules"),
-                "exit_rules": parsed_strategy.get("exit_rules"),
-                "stop_loss": parsed_strategy.get("stop_loss"),
-                "take_profit": parsed_strategy.get("take_profit"),
-                "position_size": parsed_strategy.get("position_size"),
-                "natural_language_query": query
-            }
-            
-            from app.schemas.backtest import BacktestStrategyCreate
-            strategy_create = BacktestStrategyCreate(**strategy_data)
-            strategy = crud.create_backtest_strategy(self.db, strategy_create, user_id)
-            
-            return strategy
-            
-        except Exception as e:
-            print(f"Error parsing natural language query: {str(e)}")
-            return None
-    
-    def _parse_natural_language_with_ai(
-        self,
-        query: str,
-        symbol: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        initial_capital: float = 100000.0
-    ) -> Optional[Dict[str, Any]]:
-        """Use OpenAI to parse natural language and extract strategy parameters"""
-        
-        # Build the prompt
-        system_prompt = """You are an expert trading strategy parser. Extract trading strategy parameters from natural language queries.
-
-Extract the following information:
-1. **symbol**: Trading symbol (e.g., "AAPL", "BTC/USD", "EUR/USD", "gold", "XAU/USD"). If not mentioned, infer from context.
-2. **asset_type**: One of: "stocks", "crypto", "forex", "commodities", "options", "futures"
-3. **timeframe**: Chart timeframe (e.g., "1m", "5m", "15m", "1h", "4h", "1d", "1w"). Default to "1d" if not specified.
-4. **start_date**: Start date in ISO format (YYYY-MM-DD). If relative (e.g., "last 5 years", "past year"), calculate from today.
-5. **end_date**: End date in ISO format (YYYY-MM-DD). Default to today if not specified.
-6. **indicators**: List of technical indicators mentioned (e.g., ["RSI", "MACD", "SMA", "EMA", "BB", "ATR"])
-7. **entry_rules**: Entry conditions in rule format (e.g., "RSI < 30", "PRICE CROSSES ABOVE SMA(50)", "MACD CROSSES ABOVE SIGNAL")
-8. **exit_rules**: Exit conditions in rule format (e.g., "RSI > 70", "PRICE CROSSES BELOW SMA(50)", "MACD CROSSES BELOW SIGNAL")
-9. **stop_loss**: Stop loss percentage (e.g., 5 means 5%). Extract if mentioned.
-10. **take_profit**: Take profit percentage (e.g., 10 means 10%). Extract if mentioned.
-11. **position_size**: Position size percentage (e.g., 2 means 2% of capital per trade). Extract if mentioned.
-12. **initial_capital**: Initial capital amount. Use provided value if not mentioned.
-13. **name**: A short descriptive name for the strategy (max 100 chars)
-
-Rule format examples:
-- "RSI < 30" → RSI indicator is less than 30
-- "RSI > 70" → RSI indicator is greater than 70
-- "PRICE CROSSES ABOVE SMA(50)" → Price crosses above 50-period SMA
-- "PRICE CROSSES BELOW SMA(50)" → Price crosses below 50-period SMA
-- "MACD CROSSES ABOVE SIGNAL" → MACD line crosses above signal line
-- "MACD CROSSES BELOW SIGNAL" → MACD line crosses below signal line
-- "PRICE > EMA(20)" → Price is above 20-period EMA
-- "BB_UPPER" → Bollinger Band upper band
-- "BB_LOWER" → Bollinger Band lower band
-
-Return ONLY valid JSON in this exact format:
-{
-  "symbol": "AAPL",
-  "asset_type": "stocks",
-  "timeframe": "1d",
-  "start_date": "2019-01-01T00:00:00Z",
-  "end_date": "2024-01-01T00:00:00Z",
-  "indicators": ["RSI"],
-  "entry_rules": "RSI < 30",
-  "exit_rules": "RSI > 70",
-  "stop_loss": 5.0,
-  "take_profit": null,
-  "position_size": 2.0,
-  "initial_capital": 100000.0,
-  "name": "RSI Oversold/Overbought Strategy"
-}"""
-
-        user_prompt = f"""Parse this trading strategy query:
-
-"{query}"
-
-Additional context:
-- Symbol (if provided): {symbol or "not specified"}
-- Start date (if provided): {start_date.isoformat() if start_date else "not specified"}
-- End date (if provided): {end_date.isoformat() if end_date else "not specified"}
-- Initial capital: ${initial_capital:,.2f}
-
-Extract all parameters and return valid JSON only."""
-
-        try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.3,
-                max_tokens=1000
-            )
-            
-            content = response.choices[0].message.content
-            parsed = json.loads(content)
-            
-            # Validate and normalize the parsed data
-            return self._normalize_parsed_strategy(parsed, symbol, start_date, end_date, initial_capital)
-            
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse AI response as JSON: {e}")
-            print(f"Response content: {content}")
-            return None
-        except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
-            return None
-    
-    def _normalize_parsed_strategy(
-        self,
-        parsed: Dict[str, Any],
-        symbol: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        initial_capital: float = 100000.0
-    ) -> Dict[str, Any]:
-        """Normalize and validate parsed strategy data"""
-        
-        # Use provided values as fallback
-        final_symbol = parsed.get("symbol") or symbol or "AAPL"
-        final_start_date = self._parse_date(parsed.get("start_date"), start_date, default_days_ago=365*5)
-        final_end_date = self._parse_date(parsed.get("end_date"), end_date, default_days_ago=0)
-        final_asset_type = parsed.get("asset_type", "stocks").lower()
-        final_timeframe = parsed.get("timeframe", "1d")
-        
-        # Normalize asset type
-        asset_type_map = {
-            "stock": "stocks",
-            "equity": "stocks",
-            "cryptocurrency": "crypto",
-            "currency": "forex",
-            "forex": "forex",
-            "commodity": "commodities",
-            "option": "options",
-            "future": "futures"
-        }
-        final_asset_type = asset_type_map.get(final_asset_type, final_asset_type)
-        
-        # Ensure asset_type is valid
-        valid_asset_types = ["stocks", "crypto", "forex", "commodities", "options", "futures"]
-        if final_asset_type not in valid_asset_types:
-            final_asset_type = "stocks"
-        
-        # Normalize timeframe
-        timeframe_map = {
-            "1 minute": "1m",
-            "5 minutes": "5m",
-            "15 minutes": "15m",
-            "30 minutes": "30m",
-            "1 hour": "1h",
-            "4 hours": "4h",
-            "1 day": "1d",
-            "daily": "1d",
-            "1 week": "1w",
-            "weekly": "1w"
-        }
-        final_timeframe = timeframe_map.get(final_timeframe.lower(), final_timeframe)
-        
-        # Normalize indicators (uppercase, remove duplicates)
-        indicators = parsed.get("indicators", [])
-        if isinstance(indicators, str):
-            indicators = [indicators]
-        indicators = [ind.upper() for ind in indicators if ind]
-        indicators = list(set(indicators))  # Remove duplicates
-        
-        # Normalize entry/exit rules
-        entry_rules = parsed.get("entry_rules") or ""
-        exit_rules = parsed.get("exit_rules") or ""
-        
-        return {
-            "symbol": final_symbol.upper().replace(" ", ""),
-            "asset_type": final_asset_type,
-            "timeframe": final_timeframe,
-            "start_date": final_start_date,
-            "end_date": final_end_date,
-            "indicators": indicators,
-            "entry_rules": entry_rules.strip(),
-            "exit_rules": exit_rules.strip(),
-            "stop_loss": parsed.get("stop_loss"),
-            "take_profit": parsed.get("take_profit"),
-            "position_size": parsed.get("position_size"),
-            "initial_capital": parsed.get("initial_capital", initial_capital),
-            "name": parsed.get("name", f"AI Strategy: {final_symbol}")
-        }
-    
-    def _parse_date(self, date_str: Optional[str], provided_date: Optional[datetime], default_days_ago: int) -> datetime:
-        """Parse date string or use provided date or calculate from default"""
-        if provided_date:
-            return provided_date
-        
-        if not date_str:
-            return datetime.now(timezone.utc) - timedelta(days=default_days_ago)
-        
-        try:
-            # Try ISO format
-            if "T" in date_str:
-                parsed = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                # Ensure timezone-aware
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return parsed
-            else:
-                # Try date only format
-                parsed = datetime.strptime(date_str, "%Y-%m-%d")
-                return parsed.replace(tzinfo=timezone.utc)
-        except:
-            # If parsing fails, use default
-            return datetime.now(timezone.utc) - timedelta(days=default_days_ago)
     
     async def run_backtest(self, strategy_id: int, result_id: int):
         """
@@ -299,52 +36,54 @@ Extract all parameters and return valid JSON only."""
             
             # Fetch historical data
             historical_data = await self._fetch_historical_data(strategy)
+            print("historical data", historical_data)
             
             if not historical_data:
                 raise ValueError("Failed to fetch historical data")
             
             # Calculate indicators
             data_with_indicators = self._calculate_indicators(historical_data, strategy.indicators or [])
-            
+            print("data with indicators", data_with_indicators)
+            return
             # Execute strategy
-            trades = self._execute_strategy(data_with_indicators, strategy)
+            # trades, final_position = self._execute_strategy(data_with_indicators, strategy)
             
-            # Calculate performance metrics
-            metrics = self._calculate_metrics(trades, strategy.initial_capital)
+            # # Calculate performance metrics
+            # metrics = self._calculate_metrics(trades, strategy.initial_capital)
             
-            # Generate equity curve
-            equity_curve = self._generate_equity_curve(trades, strategy.initial_capital, historical_data)
+            # # Generate equity curve
+            # equity_curve = self._generate_equity_curve(trades, strategy.initial_capital, data_with_indicators, final_position)
             
-            # Save trades to database
-            if trades:
-                trade_data = [
-                    {
-                        "entry_date": trade["entry_date"],
-                        "exit_date": trade.get("exit_date"),
-                        "entry_price": trade["entry_price"],
-                        "exit_price": trade.get("exit_price"),
-                        "quantity": trade["quantity"],
-                        "trade_type": trade["trade_type"],
-                        "pnl": trade.get("pnl"),
-                        "pnl_percentage": trade.get("pnl_percentage"),
-                        "duration_days": trade.get("duration_days"),
-                        "stop_loss_price": trade.get("stop_loss_price"),
-                        "take_profit_price": trade.get("take_profit_price"),
-                        "exit_reason": trade.get("exit_reason"),
-                    }
-                    for trade in trades
-                ]
-                crud.bulk_create_backtest_trades(self.db, result_id, trade_data)
+            # # Save trades to database
+            # if trades:
+            #     trade_data = [
+            #         {
+            #             "entry_date": trade["entry_date"],
+            #             "exit_date": trade.get("exit_date"),
+            #             "entry_price": trade["entry_price"],
+            #             "exit_price": trade.get("exit_price"),
+            #             "quantity": trade["quantity"],
+            #             "trade_type": trade["trade_type"],
+            #             "pnl": trade.get("pnl"),
+            #             "pnl_percentage": trade.get("pnl_percentage"),
+            #             "duration_days": trade.get("duration_days"),
+            #             "stop_loss_price": trade.get("stop_loss_price"),
+            #             "take_profit_price": trade.get("take_profit_price"),
+            #             "exit_reason": trade.get("exit_reason"),
+            #         }
+            #         for trade in trades
+            #     ]
+            #     crud.bulk_create_backtest_trades(self.db, result_id, trade_data)
             
-            # Update result with metrics
-            crud.update_backtest_result(
-                self.db, result_id, {
-                    **metrics,
-                    "equity_curve": equity_curve,
-                    "status": BacktestStatus.COMPLETED,
-                    "completed_at": datetime.now(timezone.utc)
-                }
-            )
+            # # Update result with metrics
+            # crud.update_backtest_result(
+            #     self.db, result_id, {
+            #         **metrics,
+            #         "equity_curve": equity_curve,
+            #         "status": BacktestStatus.COMPLETED,
+            #         "completed_at": datetime.now(timezone.utc)
+            #     }
+            # )
             
         except Exception as e:
             # Update result with error
@@ -362,32 +101,34 @@ Extract all parameters and return valid JSON only."""
         Fetch historical price data for the symbol using Polygon API.
         Returns list of OHLCV bars.
         """
-        # Convert timeframe to Polygon multiplier and timespan
-        timeframe_map = {
-            "1m": ("minute", 1),
-            "5m": ("minute", 5),
-            "15m": ("minute", 15),
-            "1h": ("hour", 1),
-            "4h": ("hour", 4),
-            "1d": ("day", 1),
-            "1w": ("week", 1),
-        }
+        # Extract all needed values from strategy object immediately
+        # to avoid DetachedInstanceError when accessing attributes
+        timeframe = str(strategy.timeframe).lower()
+        start_date = strategy.start_date
+        end_date = strategy.end_date
+        symbol_str = str(strategy.symbol)
         
-        timespan, multiplier = timeframe_map.get(strategy.timeframe.lower(), ("day", 1))
+        # Handle asset_type enum - get the value directly
+        asset_type_value = str(strategy.asset_type.value) if hasattr(strategy.asset_type, 'value') else str(strategy.asset_type)
+        
+        multiplier = 1
+        timespan = timeframe
         
         # Format dates
-        start_date_str = strategy.start_date.strftime("%Y-%m-%d")
-        end_date_str = strategy.end_date.strftime("%Y-%m-%d")
+        start_date_str = start_date.strftime("%Y-%m-%d")
+        end_date_str = end_date.strftime("%Y-%m-%d")
         
         # Format symbol based on asset type
-        symbol = self._format_symbol_for_polygon(strategy.symbol, strategy.asset_type.value)
+        symbol = self._format_symbol_for_polygon(symbol_str, asset_type_value)
         
         # Build Polygon aggregates API URL
-        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date_str}/{end_date_str}"
+        url = f"https://api.massive.com/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date_str}/{end_date_str}?adjusted=true&sort=asc&limit=50000"
         
         try:
             # Make request (PolygonService uses async, so we need to handle it)
-            response = await self.polygon_service._make_request(url, "stocks")
+            # Use asset type to determine API type (stocks, crypto, forex, options)
+            api_type = asset_type_value
+            response = await self.polygon_service._make_request(url, api_type)
             
             if response.get("status") == "ERROR" or not response.get("results"):
                 return []
@@ -418,21 +159,12 @@ Extract all parameters and return valid JSON only."""
         """Format symbol for Polygon API based on asset type"""
         symbol_upper = symbol.upper()
         
-        if asset_type == "stocks":
-            # Stocks: just return uppercase (e.g., "AAPL")
-            return symbol_upper
-        elif asset_type == "crypto":
-            # Crypto: Convert BTC/USD to X:BTCUSD format
-            if "/" in symbol:
-                base, quote = symbol_upper.split("/")
-                return f"X:{base}{quote}"
-            return f"X:{symbol_upper}USD"
+        if asset_type == "crypto":
+            # Crypto: Convert to X:BTCUSD format
+            return f"X:{symbol_upper}"
         elif asset_type == "forex":
-            # Forex: Convert EUR/USD to C:EURUSD format
-            if "/" in symbol:
-                base, quote = symbol_upper.split("/")
-                return f"C:{base}{quote}"
-            return f"C:{symbol_upper}USD"
+            # Forex: Convert to C:EURUSD format
+            return f"C:{symbol_upper}"
         else:
             # Default: return as is
             return symbol_upper
@@ -493,12 +225,30 @@ Extract all parameters and return valid JSON only."""
                 period = period or 14
                 result = self._calculate_atr(result, period=period)
                 calculated.add(indicator_key)
+            elif indicator_name == "stochastic":
+                period = period or 14
+                k_period = period
+                d_period = 3  # Default smoothing period
+                result = self._calculate_stochastic(result, k_period=k_period, d_period=d_period)
+                calculated.add(indicator_key)
+            elif indicator_name == "williams" or indicator_name == "williamsr":
+                period = period or 14
+                result = self._calculate_williams_r(result, period=period)
+                calculated.add(indicator_key)
+            elif indicator_name == "cci":
+                period = period or 20
+                result = self._calculate_cci(result, period=period)
+                calculated.add(indicator_key)
+            elif indicator_name == "adx":
+                period = period or 14
+                result = self._calculate_adx(result, period=period)
+                calculated.add(indicator_key)
         
         return result
     
     def _execute_strategy(
         self, data: List[Dict[str, Any]], strategy: BacktestStrategy
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Execute the trading strategy on historical data.
         Parses entry/exit rules and executes trades.
@@ -557,7 +307,7 @@ Extract all parameters and return valid JSON only."""
                 
                 # Check exit rules
                 if not exit_reason and strategy.exit_rules:
-                    if self._evaluate_condition(strategy.exit_rules, bar, position, prev_bar):
+                    if self._evaluate_rules(strategy.exit_rules, bar, position, prev_bar):
                         exit_reason = "signal"
                         exit_price = current_price
                 
@@ -582,13 +332,13 @@ Extract all parameters and return valid JSON only."""
                         "exit_reason": exit_reason,
                     })
                     
-                    # Update capital
-                    available_capital += (position["entry_price"] * position["quantity"]) + pnl
+                    # Update capital - add back exit value (exit_price * quantity)
+                    available_capital += exit_price * position["quantity"]
                     position = None
             
             # Check entry conditions (if we don't have a position)
             if not position and strategy.entry_rules:
-                if self._evaluate_condition(strategy.entry_rules, bar, None, prev_bar):
+                if self._evaluate_rules(strategy.entry_rules, bar, None, prev_bar):
                     # Determine trade type (default to long)
                     trade_type = "long"  # Could be determined from rules
                     
@@ -649,199 +399,192 @@ Extract all parameters and return valid JSON only."""
                 "take_profit_price": position.get("take_profit"),
                 "exit_reason": "end_of_period",
             })
+            # Update capital for final position closure
+            available_capital += exit_price * position["quantity"]
+            position = None
         
-        return trades
+        return trades, position
     
-    def _evaluate_condition(self, condition_text: str, bar: Dict[str, Any], position: Optional[Dict] = None, prev_bar: Optional[Dict] = None) -> bool:
+    def _evaluate_rules(self, rules_json: str, bar: Dict[str, Any], position: Optional[Dict] = None, prev_bar: Optional[Dict] = None) -> bool:
         """
-        Evaluate a trading condition rule.
-        Supports simple conditions like:
-        - "RSI < 30"
-        - "price > SMA(20)"
-        - "MACD crosses above signal"
-        - "RSI < 30 AND price > SMA(20)"
+        Evaluate structured trading rules from JSON.
+        Rules format: [{"indicator": "rsi", "operator": "<", "value": "30", "logic": "AND"}, ...]
         """
-        if not condition_text:
+        if not rules_json:
             return False
         
-        condition_text = condition_text.strip().upper()
-        
-        # Handle AND/OR logic
-        if " AND " in condition_text:
-            parts = condition_text.split(" AND ")
-            return all(self._evaluate_single_condition(part.strip(), bar, position, prev_bar) for part in parts)
-        elif " OR " in condition_text:
-            parts = condition_text.split(" OR ")
-            return any(self._evaluate_single_condition(part.strip(), bar, position, prev_bar) for part in parts)
-        else:
-            return self._evaluate_single_condition(condition_text, bar, position, prev_bar)
+        try:
+            rules = json.loads(rules_json) if isinstance(rules_json, str) else rules_json
+            if not isinstance(rules, list) or len(rules) == 0:
+                return False
+            
+            # Evaluate first rule
+            result = self._evaluate_single_structured_rule(rules[0], bar, position, prev_bar)
+            
+            # Evaluate remaining rules with their logic operators
+            for i in range(1, len(rules)):
+                rule = rules[i]
+                rule_result = self._evaluate_single_structured_rule(rule, bar, position, prev_bar)
+                logic = rule.get("logic", "AND").upper()
+                
+                if logic == "AND":
+                    result = result and rule_result
+                elif logic == "OR":
+                    result = result or rule_result
+                else:
+                    # Default to AND if unknown logic
+                    result = result and rule_result
+            
+            return result
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            print(f"Error evaluating rules: {e}")
+            return False
     
-    def _evaluate_single_condition(self, condition: str, bar: Dict[str, Any], position: Optional[Dict] = None, prev_bar: Optional[Dict] = None) -> bool:
-        """Evaluate a single condition"""
-        condition = condition.strip()
+    def _evaluate_single_structured_rule(self, rule: Dict[str, Any], bar: Dict[str, Any], position: Optional[Dict] = None, prev_bar: Optional[Dict] = None) -> bool:
+        """Evaluate a single structured rule"""
+        indicator = rule.get("indicator", "").lower()
+        operator = rule.get("operator", "")
+        value = rule.get("value", "")
         
-        # Price comparisons
-        if "PRICE" in condition:
-            price = bar["close"]
-            if "PRICE >" in condition:
-                # Extract value after >
-                try:
-                    value = float(condition.split("PRICE >")[1].strip())
-                    return price > value
-                except:
-                    pass
-            elif "PRICE <" in condition:
-                try:
-                    value = float(condition.split("PRICE <")[1].strip())
-                    return price < value
-                except:
-                    pass
+        if not indicator or not operator:
+            return False
         
-        # RSI conditions
-        if "RSI" in condition:
-            rsi = bar.get("rsi") or bar.get("rsi_14")
-            if rsi is None:
-                return False
-            
-            if "RSI <" in condition:
-                try:
-                    value = float(condition.split("RSI <")[1].strip())
-                    return rsi < value
-                except:
-                    pass
-            elif "RSI >" in condition:
-                try:
-                    value = float(condition.split("RSI >")[1].strip())
-                    return rsi > value
-                except:
-                    pass
+        # Get indicator value from bar
+        indicator_value = self._get_indicator_value(indicator, bar)
+        if indicator_value is None:
+            return False
         
-        # SMA conditions
-        if "SMA" in condition or "SMA(" in condition:
-            # Extract period from SMA(20) or use default
-            period = 20
-            if "SMA(" in condition:
-                try:
-                    period_str = condition.split("SMA(")[1].split(")")[0]
-                    period = int(period_str)
-                except:
-                    pass
-            
-            sma_key = f"sma_{period}" if period != 20 else "sma"
-            sma = bar.get(sma_key) or bar.get("sma")
-            price = bar["close"]
-            
-            if sma is None:
-                return False
-            
-            if "PRICE > SMA" in condition or f"PRICE > SMA({period})" in condition:
-                return price > sma
-            elif "PRICE < SMA" in condition or f"PRICE < SMA({period})" in condition:
-                return price < sma
-            elif "PRICE CROSSES ABOVE SMA" in condition or "CROSSES ABOVE SMA" in condition:
-                # Check crossover: price was below SMA, now above
-                if prev_bar:
-                    prev_sma_key = f"sma_{period}" if period != 20 else "sma"
-                    prev_sma = prev_bar.get(prev_sma_key) or prev_bar.get("sma")
-                    prev_price = prev_bar["close"]
-                    if prev_sma is not None:
-                        return prev_price <= prev_sma and price > sma
-                return False
-            elif "PRICE CROSSES BELOW SMA" in condition or "CROSSES BELOW SMA" in condition:
-                # Check crossover: price was above SMA, now below
-                if prev_bar:
-                    prev_sma_key = f"sma_{period}" if period != 20 else "sma"
-                    prev_sma = prev_bar.get(prev_sma_key) or prev_bar.get("sma")
-                    prev_price = prev_bar["close"]
-                    if prev_sma is not None:
-                        return prev_price >= prev_sma and price < sma
-                return False
+        # Handle crossover operators
+        if operator == "crosses_above":
+            if prev_bar:
+                # Special handling for MACD crossovers (MACD crosses above signal)
+                if indicator == "macd" and value.lower() == "signal":
+                    prev_macd = self._get_indicator_value("macd", prev_bar)
+                    prev_signal = self._get_indicator_value("macd_signal", prev_bar)
+                    curr_signal = self._get_indicator_value("macd_signal", bar)
+                    if prev_macd is not None and prev_signal is not None and curr_signal is not None:
+                        return prev_macd <= prev_signal and indicator_value > curr_signal
+                else:
+                    # Price/indicator crosses above another indicator
+                    prev_indicator_value = self._get_indicator_value(indicator, prev_bar)
+                    prev_compare_value = self._get_indicator_value(value.lower(), prev_bar) if value else None
+                    curr_compare_value = self._get_indicator_value(value.lower(), bar) if value else None
+                    if prev_indicator_value is not None and prev_compare_value is not None and curr_compare_value is not None:
+                        return prev_indicator_value <= prev_compare_value and indicator_value > curr_compare_value
+            return False
+        elif operator == "crosses_below":
+            if prev_bar:
+                # Special handling for MACD crossovers (MACD crosses below signal)
+                if indicator == "macd" and value.lower() == "signal":
+                    prev_macd = self._get_indicator_value("macd", prev_bar)
+                    prev_signal = self._get_indicator_value("macd_signal", prev_bar)
+                    curr_signal = self._get_indicator_value("macd_signal", bar)
+                    if prev_macd is not None and prev_signal is not None and curr_signal is not None:
+                        return prev_macd >= prev_signal and indicator_value < curr_signal
+                else:
+                    # Price/indicator crosses below another indicator
+                    prev_indicator_value = self._get_indicator_value(indicator, prev_bar)
+                    prev_compare_value = self._get_indicator_value(value.lower(), prev_bar) if value else None
+                    curr_compare_value = self._get_indicator_value(value.lower(), bar) if value else None
+                    if prev_indicator_value is not None and prev_compare_value is not None and curr_compare_value is not None:
+                        return prev_indicator_value >= prev_compare_value and indicator_value < curr_compare_value
+            return False
         
-        # EMA conditions (similar to SMA)
-        if "EMA" in condition or "EMA(" in condition:
-            period = 20
-            if "EMA(" in condition:
-                try:
-                    period_str = condition.split("EMA(")[1].split(")")[0]
-                    period = int(period_str)
-                except:
-                    pass
-            
-            ema_key = f"ema_{period}" if period != 20 else "ema"
-            ema = bar.get(ema_key) or bar.get("ema")
-            price = bar["close"]
-            
-            if ema is None:
-                return False
-            
-            if "PRICE > EMA" in condition:
-                return price > ema
-            elif "PRICE < EMA" in condition:
-                return price < ema
-            elif "PRICE CROSSES ABOVE EMA" in condition or "CROSSES ABOVE EMA" in condition:
-                # Check crossover: price was below EMA, now above
-                if prev_bar:
-                    prev_ema_key = f"ema_{period}" if period != 20 else "ema"
-                    prev_ema = prev_bar.get(prev_ema_key) or prev_bar.get("ema")
-                    prev_price = prev_bar["close"]
-                    if prev_ema is not None:
-                        return prev_price <= prev_ema and price > ema
-                return False
-            elif "PRICE CROSSES BELOW EMA" in condition or "CROSSES BELOW EMA" in condition:
-                # Check crossover: price was above EMA, now below
-                if prev_bar:
-                    prev_ema_key = f"ema_{period}" if period != 20 else "ema"
-                    prev_ema = prev_bar.get(prev_ema_key) or prev_bar.get("ema")
-                    prev_price = prev_bar["close"]
-                    if prev_ema is not None:
-                        return prev_price >= prev_ema and price < ema
-                return False
+        # Handle comparison operators
+        # Check if value is an indicator name (not a number)
+        compare_indicator_value = self._get_indicator_value(value.lower(), bar) if value else None
         
-        # MACD conditions
-        if "MACD" in condition:
-            macd = bar.get("macd")
-            macd_signal = bar.get("macd_signal")
-            
-            if macd is None or macd_signal is None:
+        if compare_indicator_value is not None:
+            # Indicator-to-indicator comparison
+            if operator == ">":
+                return indicator_value > compare_indicator_value
+            elif operator == "<":
+                return indicator_value < compare_indicator_value
+            elif operator == ">=":
+                return indicator_value >= compare_indicator_value
+            elif operator == "<=":
+                return indicator_value <= compare_indicator_value
+            elif operator == "==":
+                return abs(indicator_value - compare_indicator_value) < 0.0001  # Float comparison
+        else:
+            # Indicator-to-numeric comparison
+            try:
+                compare_value = float(value)
+            except (ValueError, TypeError):
                 return False
             
-            if "MACD > SIGNAL" in condition:
-                return macd > macd_signal
-            elif "MACD < SIGNAL" in condition:
-                return macd < macd_signal
-            elif "MACD CROSSES ABOVE SIGNAL" in condition or "CROSSES ABOVE SIGNAL" in condition:
-                # Check crossover: MACD was below signal, now above
-                if prev_bar:
-                    prev_macd = prev_bar.get("macd")
-                    prev_signal = prev_bar.get("macd_signal")
-                    if prev_macd is not None and prev_signal is not None:
-                        return prev_macd <= prev_signal and macd > macd_signal
-                return False
-            elif "MACD CROSSES BELOW SIGNAL" in condition or "CROSSES BELOW SIGNAL" in condition:
-                # Check crossover: MACD was above signal, now below
-                if prev_bar:
-                    prev_macd = prev_bar.get("macd")
-                    prev_signal = prev_bar.get("macd_signal")
-                    if prev_macd is not None and prev_signal is not None:
-                        return prev_macd >= prev_signal and macd < macd_signal
-                return False
+            if operator == ">":
+                return indicator_value > compare_value
+            elif operator == "<":
+                return indicator_value < compare_value
+            elif operator == ">=":
+                return indicator_value >= compare_value
+            elif operator == "<=":
+                return indicator_value <= compare_value
+            elif operator == "==":
+                return abs(indicator_value - compare_value) < 0.0001  # Float comparison
         
-        # Bollinger Bands conditions
-        if "BOLLINGER" in condition or "BB" in condition:
-            bb_upper = bar.get("bb_upper")
-            bb_lower = bar.get("bb_lower")
-            price = bar["close"]
-            
-            if bb_upper is None or bb_lower is None:
-                return False
-            
-            if "PRICE < BB_LOWER" in condition or "PRICE < LOWER BAND" in condition:
-                return price < bb_lower
-            elif "PRICE > BB_UPPER" in condition or "PRICE > UPPER BAND" in condition:
-                return price > bb_upper
-        
-        # Default: return False if condition not recognized
         return False
+    
+    def _get_indicator_value(self, indicator: str, bar: Dict[str, Any]) -> Optional[float]:
+        """Get the indicator value from bar data"""
+        indicator_lower = indicator.lower()
+        
+        # RSI
+        if indicator_lower == "rsi":
+            return bar.get("rsi") or bar.get("rsi_14")
+        
+        # SMA
+        if indicator_lower == "sma":
+            return bar.get("sma") or bar.get("sma_20")
+        
+        # EMA
+        if indicator_lower == "ema":
+            return bar.get("ema") or bar.get("ema_20")
+        
+        # MACD
+        if indicator_lower == "macd":
+            return bar.get("macd")
+        
+        # MACD Signal
+        if indicator_lower == "macd_signal":
+            return bar.get("macd_signal")
+        
+        # Bollinger Bands
+        if indicator_lower == "bb_upper":
+            return bar.get("bb_upper")
+        if indicator_lower == "bb_lower":
+            return bar.get("bb_lower")
+        if indicator_lower == "bb_middle":
+            return bar.get("bb_middle")
+        
+        # ATR
+        if indicator_lower == "atr":
+            return bar.get("atr") or bar.get("atr_14")
+        
+        # Stochastic
+        if indicator_lower == "stochastic" or indicator_lower == "stochastic_k":
+            return bar.get("stochastic_k") or bar.get("stochastic_k_14")
+        if indicator_lower == "stochastic_d":
+            return bar.get("stochastic_d") or bar.get("stochastic_d_3")
+        
+        # Williams %R
+        if indicator_lower == "williams" or indicator_lower == "williamsr":
+            return bar.get("williams_r") or bar.get("williams_r_14")
+        
+        # CCI
+        if indicator_lower == "cci":
+            return bar.get("cci") or bar.get("cci_20")
+        
+        # ADX
+        if indicator_lower == "adx":
+            return bar.get("adx") or bar.get("adx_14")
+        
+        # Price
+        if indicator_lower == "price":
+            return bar.get("close")
+        
+        return None
     
     def _calculate_pnl(self, position: Dict[str, Any], exit_price: float) -> float:
         """Calculate profit/loss for a position"""
@@ -997,46 +740,88 @@ Extract all parameters and return valid JSON only."""
         return max_dd
     
     def _generate_equity_curve(
-        self, trades: List[Dict[str, Any]], initial_capital: float, data: List[Dict[str, Any]]
+        self, trades: List[Dict[str, Any]], initial_capital: float, data: List[Dict[str, Any]], final_position: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
         Generate equity curve data points.
         Tracks portfolio value over time with drawdown calculation.
+        Accounts for open positions by including their current value.
         """
-        if not trades or not data:
+        if not data:
             return []
         
         equity_curve = []
-        equity = initial_capital
         peak = initial_capital
         
-        # Create a map of trades by date for quick lookup
-        trades_by_date = {}
+        # Create maps for trades by entry and exit dates
+        trades_by_exit_date = {}
+        trades_by_entry_date = {}
         for trade in trades:
+            entry_date = trade.get("entry_date")
             exit_date = trade.get("exit_date")
+            if entry_date:
+                entry_key = entry_date.date() if hasattr(entry_date, 'date') else entry_date
+                if entry_key not in trades_by_entry_date:
+                    trades_by_entry_date[entry_key] = []
+                trades_by_entry_date[entry_key].append(trade)
             if exit_date:
-                # Use date as key (without time)
-                date_key = exit_date.date() if hasattr(exit_date, 'date') else exit_date
-                if date_key not in trades_by_date:
-                    trades_by_date[date_key] = []
-                trades_by_date[date_key].append(trade)
+                exit_key = exit_date.date() if hasattr(exit_date, 'date') else exit_date
+                if exit_key not in trades_by_exit_date:
+                    trades_by_exit_date[exit_key] = []
+                trades_by_exit_date[exit_key].append(trade)
         
-        # Track cumulative PnL
+        # Track current open positions and cumulative PnL
+        open_positions = {}  # {entry_date_key: trade}
         cumulative_pnl = 0.0
         
         # Generate equity curve points
-        for bar in data:
+        for i, bar in enumerate(data):
             bar_date = bar["date"]
             date_key = bar_date.date() if hasattr(bar_date, 'date') else bar_date
+            current_price = bar["close"]
             
             # Check if any trades closed on this date
-            if date_key in trades_by_date:
-                for trade in trades_by_date[date_key]:
+            if date_key in trades_by_exit_date:
+                for trade in trades_by_exit_date[date_key]:
                     pnl = trade.get("pnl", 0)
                     cumulative_pnl += pnl
+                    # Remove from open positions
+                    entry_key = trade.get("entry_date")
+                    if entry_key:
+                        entry_key = entry_key.date() if hasattr(entry_key, 'date') else entry_key
+                        if entry_key in open_positions:
+                            del open_positions[entry_key]
             
-            # Calculate current equity
-            current_equity = initial_capital + cumulative_pnl
+            # Check if any trades opened on this date
+            if date_key in trades_by_entry_date:
+                for trade in trades_by_entry_date[date_key]:
+                    entry_key = trade.get("entry_date")
+                    if entry_key:
+                        entry_key = entry_key.date() if hasattr(entry_key, 'date') else entry_key
+                        open_positions[entry_key] = trade
+            
+            # Calculate current equity = initial capital + cumulative PnL + unrealized PnL from open positions
+            unrealized_pnl = 0.0
+            for trade in open_positions.values():
+                entry_price = trade.get("entry_price", 0)
+                quantity = trade.get("quantity", 0)
+                trade_type = trade.get("trade_type", "long")
+                if trade_type == "long":
+                    unrealized_pnl += (current_price - entry_price) * quantity
+                else:  # short
+                    unrealized_pnl += (entry_price - current_price) * quantity
+            
+            # Also account for final position if it exists and hasn't been closed
+            if final_position and i == len(data) - 1:
+                entry_price = final_position.get("entry_price", 0)
+                quantity = final_position.get("quantity", 0)
+                trade_type = final_position.get("type", "long")
+                if trade_type == "long":
+                    unrealized_pnl += (current_price - entry_price) * quantity
+                else:  # short
+                    unrealized_pnl += (entry_price - current_price) * quantity
+            
+            current_equity = initial_capital + cumulative_pnl + unrealized_pnl
             
             # Update peak
             if current_equity > peak:
@@ -1230,6 +1015,186 @@ Extract all parameters and return valid JSON only."""
             atr = sum(true_ranges[i - period:i]) / period
             result[i]["atr"] = atr
             result[i][f"atr_{period}"] = atr
+        
+        return result
+    
+    def _calculate_stochastic(self, data: List[Dict], k_period: int = 14, d_period: int = 3) -> List[Dict]:
+        """Calculate Stochastic Oscillator (%K and %D)"""
+        if len(data) < k_period + d_period:
+            return data
+        
+        result = data.copy()
+        
+        for i in range(k_period - 1, len(data)):
+            # Get the period's high and low
+            period_data = data[i - k_period + 1:i + 1]
+            highest_high = max(bar["high"] for bar in period_data)
+            lowest_low = min(bar["low"] for bar in period_data)
+            current_close = data[i]["close"]
+            
+            if highest_high == lowest_low:
+                k_value = 50.0  # Neutral value when no range
+            else:
+                k_value = ((current_close - lowest_low) / (highest_high - lowest_low)) * 100
+            
+            result[i]["stochastic_k"] = k_value
+            result[i][f"stochastic_k_{k_period}"] = k_value
+            
+            # Calculate %D (smoothed %K) if we have enough data
+            if i >= k_period + d_period - 2:
+                k_values = [result[j].get("stochastic_k", 50.0) for j in range(i - d_period + 1, i + 1)]
+                d_value = sum(k_values) / d_period
+                result[i]["stochastic_d"] = d_value
+                result[i][f"stochastic_d_{d_period}"] = d_value
+        
+        return result
+    
+    def _calculate_williams_r(self, data: List[Dict], period: int = 14) -> List[Dict]:
+        """Calculate Williams %R"""
+        if len(data) < period:
+            return data
+        
+        result = data.copy()
+        
+        for i in range(period - 1, len(data)):
+            # Get the period's high and low
+            period_data = data[i - period + 1:i + 1]
+            highest_high = max(bar["high"] for bar in period_data)
+            lowest_low = min(bar["low"] for bar in period_data)
+            current_close = data[i]["close"]
+            
+            if highest_high == lowest_low:
+                williams_r = -50.0  # Neutral value when no range
+            else:
+                williams_r = ((highest_high - current_close) / (highest_high - lowest_low)) * -100
+            
+            result[i]["williams_r"] = williams_r
+            result[i][f"williams_r_{period}"] = williams_r
+        
+        return result
+    
+    def _calculate_cci(self, data: List[Dict], period: int = 20) -> List[Dict]:
+        """Calculate Commodity Channel Index (CCI)"""
+        if len(data) < period:
+            return data
+        
+        result = data.copy()
+        
+        # Calculate Typical Price (TP) = (High + Low + Close) / 3
+        for i in range(len(data)):
+            tp = (data[i]["high"] + data[i]["low"] + data[i]["close"]) / 3.0
+            result[i]["typical_price"] = tp
+        
+        # Calculate CCI
+        for i in range(period - 1, len(data)):
+            # Get SMA of TP
+            tp_values = [result[j]["typical_price"] for j in range(i - period + 1, i + 1)]
+            sma_tp = sum(tp_values) / period
+            
+            # Calculate Mean Deviation
+            mean_deviation = sum(abs(tp - sma_tp) for tp in tp_values) / period
+            
+            # Calculate CCI
+            current_tp = result[i]["typical_price"]
+            if mean_deviation == 0:
+                cci = 0.0
+            else:
+                cci = (current_tp - sma_tp) / (0.015 * mean_deviation)
+            
+            result[i]["cci"] = cci
+            result[i][f"cci_{period}"] = cci
+        
+        return result
+    
+    def _calculate_adx(self, data: List[Dict], period: int = 14) -> List[Dict]:
+        """Calculate Average Directional Index (ADX)"""
+        if len(data) < period + 1:
+            return data
+        
+        result = data.copy()
+        
+        # Calculate True Range (TR) and Directional Movement (+DM and -DM)
+        for i in range(1, len(data)):
+            # True Range
+            tr1 = data[i]["high"] - data[i]["low"]
+            tr2 = abs(data[i]["high"] - data[i - 1]["close"])
+            tr3 = abs(data[i]["low"] - data[i - 1]["close"])
+            tr = max(tr1, tr2, tr3)
+            result[i]["tr"] = tr
+            
+            # Directional Movement
+            up_move = data[i]["high"] - data[i - 1]["high"]
+            down_move = data[i - 1]["low"] - data[i]["low"]
+            
+            if up_move > down_move and up_move > 0:
+                plus_dm = up_move
+                minus_dm = 0.0
+            elif down_move > up_move and down_move > 0:
+                plus_dm = 0.0
+                minus_dm = down_move
+            else:
+                plus_dm = 0.0
+                minus_dm = 0.0
+            
+            result[i]["plus_dm"] = plus_dm
+            result[i]["minus_dm"] = minus_dm
+        
+        # Calculate smoothed TR, +DM, -DM (using Wilder's smoothing)
+        # First period: simple average
+        if len(data) >= period + 1:
+            tr_sum = sum(result[i]["tr"] for i in range(1, period + 1))
+            plus_dm_sum = sum(result[i]["plus_dm"] for i in range(1, period + 1))
+            minus_dm_sum = sum(result[i]["minus_dm"] for i in range(1, period + 1))
+            
+            result[period]["atr_adx"] = tr_sum / period
+            result[period]["plus_di"] = (plus_dm_sum / tr_sum * 100) if tr_sum > 0 else 0.0
+            result[period]["minus_di"] = (minus_dm_sum / tr_sum * 100) if tr_sum > 0 else 0.0
+            
+            # Calculate DX and ADX
+            di_sum = result[period]["plus_di"] + result[period]["minus_di"]
+            if di_sum > 0:
+                dx = abs(result[period]["plus_di"] - result[period]["minus_di"]) / di_sum * 100
+            else:
+                dx = 0.0
+            
+            result[period]["dx"] = dx
+            result[period]["adx"] = dx  # First ADX value is DX
+        
+        # Subsequent periods: Wilder's smoothing
+        for i in range(period + 1, len(data)):
+            # Smooth TR, +DM, -DM
+            prev_atr = result[i - 1].get("atr_adx", result[period]["atr_adx"])
+            result[i]["atr_adx"] = (prev_atr * (period - 1) + result[i]["tr"]) / period
+            
+            prev_plus_dm_sum = result[i - 1].get("plus_dm_sum", plus_dm_sum)
+            prev_minus_dm_sum = result[i - 1].get("minus_dm_sum", minus_dm_sum)
+            plus_dm_sum = (prev_plus_dm_sum * (period - 1) + result[i]["plus_dm"]) / period
+            minus_dm_sum = (prev_minus_dm_sum * (period - 1) + result[i]["minus_dm"]) / period
+            
+            result[i]["plus_dm_sum"] = plus_dm_sum
+            result[i]["minus_dm_sum"] = minus_dm_sum
+            
+            # Calculate +DI and -DI
+            if result[i]["atr_adx"] > 0:
+                result[i]["plus_di"] = (plus_dm_sum / result[i]["atr_adx"] * 100)
+                result[i]["minus_di"] = (minus_dm_sum / result[i]["atr_adx"] * 100)
+            else:
+                result[i]["plus_di"] = 0.0
+                result[i]["minus_di"] = 0.0
+            
+            # Calculate DX
+            di_sum = result[i]["plus_di"] + result[i]["minus_di"]
+            if di_sum > 0:
+                dx = abs(result[i]["plus_di"] - result[i]["minus_di"]) / di_sum * 100
+            else:
+                dx = 0.0
+            
+            result[i]["dx"] = dx
+            
+            # Calculate ADX (smoothed DX)
+            prev_adx = result[i - 1].get("adx", dx)
+            result[i]["adx"] = (prev_adx * (period - 1) + dx) / period
+            result[i][f"adx_{period}"] = result[i]["adx"]
         
         return result
     
