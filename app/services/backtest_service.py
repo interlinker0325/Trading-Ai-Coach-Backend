@@ -43,8 +43,7 @@ class BacktestService:
             
             # Calculate indicators
             data_with_indicators = self._calculate_indicators(historical_data, strategy.indicators or [])
-            print("data with indicators", data_with_indicators)
-            return
+
             # Execute strategy
             # trades, final_position = self._execute_strategy(data_with_indicators, strategy)
             
@@ -182,6 +181,7 @@ class BacktestService:
         calculated = set()
         
         for indicator in indicators:
+            print("indicator", indicator)
             indicator_lower = indicator.lower()
             
             # Handle indicators with period specification (e.g., "sma_50", "rsi_21")
