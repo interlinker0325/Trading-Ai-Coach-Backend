@@ -6,6 +6,9 @@ from app.crud import backtest as crud
 from app.services.polygon_service import PolygonService
 import math
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BacktestService:
@@ -36,7 +39,6 @@ class BacktestService:
             
             # Fetch historical data
             historical_data = await self._fetch_historical_data(strategy)
-            print("historical data", historical_data)
             
             if not historical_data:
                 raise ValueError("Failed to fetch historical data")
@@ -45,44 +47,44 @@ class BacktestService:
             data_with_indicators = self._calculate_indicators(historical_data, strategy.indicators or [])
 
             # Execute strategy
-            # trades, final_position = self._execute_strategy(data_with_indicators, strategy)
+            trades, final_position = self._execute_strategy(data_with_indicators, strategy)
             
-            # # Calculate performance metrics
-            # metrics = self._calculate_metrics(trades, strategy.initial_capital)
+            # Calculate performance metrics
+            metrics = self._calculate_metrics(trades, strategy.initial_capital)
             
-            # # Generate equity curve
-            # equity_curve = self._generate_equity_curve(trades, strategy.initial_capital, data_with_indicators, final_position)
+            # Generate equity curve
+            equity_curve = self._generate_equity_curve(trades, strategy.initial_capital, data_with_indicators, final_position)
             
-            # # Save trades to database
-            # if trades:
-            #     trade_data = [
-            #         {
-            #             "entry_date": trade["entry_date"],
-            #             "exit_date": trade.get("exit_date"),
-            #             "entry_price": trade["entry_price"],
-            #             "exit_price": trade.get("exit_price"),
-            #             "quantity": trade["quantity"],
-            #             "trade_type": trade["trade_type"],
-            #             "pnl": trade.get("pnl"),
-            #             "pnl_percentage": trade.get("pnl_percentage"),
-            #             "duration_days": trade.get("duration_days"),
-            #             "stop_loss_price": trade.get("stop_loss_price"),
-            #             "take_profit_price": trade.get("take_profit_price"),
-            #             "exit_reason": trade.get("exit_reason"),
-            #         }
-            #         for trade in trades
-            #     ]
-            #     crud.bulk_create_backtest_trades(self.db, result_id, trade_data)
+            # Save trades to database
+            if trades:
+                trade_data = [
+                    {
+                        "entry_date": trade["entry_date"],
+                        "exit_date": trade.get("exit_date"),
+                        "entry_price": trade["entry_price"],
+                        "exit_price": trade.get("exit_price"),
+                        "quantity": trade["quantity"],
+                        "trade_type": trade["trade_type"],
+                        "pnl": trade.get("pnl"),
+                        "pnl_percentage": trade.get("pnl_percentage"),
+                        "duration_days": trade.get("duration_days"),
+                        "stop_loss_price": trade.get("stop_loss_price"),
+                        "take_profit_price": trade.get("take_profit_price"),
+                        "exit_reason": trade.get("exit_reason"),
+                    }
+                    for trade in trades
+                ]
+                crud.bulk_create_backtest_trades(self.db, result_id, trade_data)
             
-            # # Update result with metrics
-            # crud.update_backtest_result(
-            #     self.db, result_id, {
-            #         **metrics,
-            #         "equity_curve": equity_curve,
-            #         "status": BacktestStatus.COMPLETED,
-            #         "completed_at": datetime.now(timezone.utc)
-            #     }
-            # )
+            # Update result with metrics
+            crud.update_backtest_result(
+                self.db, result_id, {
+                    **metrics,
+                    "equity_curve": equity_curve,
+                    "status": BacktestStatus.COMPLETED,
+                    "completed_at": datetime.now(timezone.utc)
+                }
+            )
             
         except Exception as e:
             # Update result with error
@@ -98,6 +100,7 @@ class BacktestService:
     async def _fetch_historical_data(self, strategy: BacktestStrategy) -> List[Dict[str, Any]]:
         """
         Fetch historical price data for the symbol using Polygon API.
+        Handles cursor-based pagination to fetch all available data.
         Returns list of OHLCV bars.
         """
         # Extract all needed values from strategy object immediately
@@ -120,38 +123,69 @@ class BacktestService:
         # Format symbol based on asset type
         symbol = self._format_symbol_for_polygon(symbol_str, asset_type_value)
         
-        # Build Polygon aggregates API URL
+        # Build initial Polygon aggregates API URL
         url = f"https://api.massive.com/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date_str}/{end_date_str}?adjusted=true&sort=asc&limit=50000"
         
         try:
-            # Make request (PolygonService uses async, so we need to handle it)
             # Use asset type to determine API type (stocks, crypto, forex, options)
             api_type = asset_type_value
-            response = await self.polygon_service._make_request(url, api_type)
             
-            if response.get("status") == "ERROR" or not response.get("results"):
-                return []
+            # Collect all bars from paginated responses
+            all_bars = []
+            next_url = url
+            max_pages = 1000  # Safety limit to prevent infinite loops
+            page_count = 0
             
-            # Convert Polygon response to our format
-            bars = []
-            for bar in response.get("results", []):
-                # Convert timestamp (ms) to datetime with timezone
-                timestamp_ms = bar["t"]
-                bar_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+            while next_url and page_count < max_pages:
+                page_count += 1
+                logger.info(f"Fetching historical data page {page_count} for {symbol}")
                 
-                bars.append({
-                    "date": bar_date,
-                    "open": bar.get("o", 0),
-                    "high": bar.get("h", 0),
-                    "low": bar.get("l", 0),
-                    "close": bar.get("c", 0),
-                    "volume": bar.get("v", 0),
-                })
+                # Make request
+                response = await self.polygon_service._make_request(next_url, api_type)
+                
+                if response.get("status") == "ERROR":
+                    logger.error(f"Error in API response: {response}")
+                    break
+                
+                # Process results
+                results = response.get("results", [])
+                if not results:
+                    logger.info(f"No more results found at page {page_count}")
+                    break
+                
+                # Convert Polygon response to our format
+                for bar in results:
+                    # Convert timestamp (ms) to datetime with timezone
+                    timestamp_ms = bar["t"]
+                    bar_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+                    
+                    all_bars.append({
+                        "date": bar_date,
+                        "open": bar.get("o", 0),
+                        "high": bar.get("h", 0),
+                        "low": bar.get("l", 0),
+                        "close": bar.get("c", 0),
+                        "volume": bar.get("v", 0),
+                    })
+                
+                # Check for next page
+                next_url = response.get("next_url")
+                if next_url:
+                    logger.info(f"Found next_url, continuing pagination. Total bars so far: {len(all_bars)}")
+                else:
+                    logger.info(f"Pagination complete. Total bars fetched: {len(all_bars)}")
             
-            return bars
+            if page_count >= max_pages:
+                logger.warning(f"Reached maximum page limit ({max_pages}). Some data may be missing.")
+            
+            # Sort bars by date to ensure chronological order (in case pagination returns out of order)
+            all_bars.sort(key=lambda x: x["date"])
+            
+            logger.info(f"Successfully fetched {len(all_bars)} bars for {symbol} from {start_date_str} to {end_date_str}")
+            return all_bars
             
         except Exception as e:
-            print(f"Error fetching historical data: {e}")
+            logger.error(f"Error fetching historical data: {e}", exc_info=True)
             return []
     
     def _format_symbol_for_polygon(self, symbol: str, asset_type: str) -> str:
@@ -181,7 +215,6 @@ class BacktestService:
         calculated = set()
         
         for indicator in indicators:
-            print("indicator", indicator)
             indicator_lower = indicator.lower()
             
             # Handle indicators with period specification (e.g., "sma_50", "rsi_21")
@@ -255,8 +288,7 @@ class BacktestService:
         """
         trades = []
         position = None  # Current position: {"type": "long"/"short", "entry_price": float, "entry_date": datetime, "quantity": float, "stop_loss": float, "take_profit": float}
-        capital = strategy.initial_capital
-        available_capital = capital
+        available_capital = strategy.initial_capital
         
         # Position size calculation
         position_size_pct = strategy.position_size or 100.0  # Percentage of capital per trade
@@ -339,12 +371,26 @@ class BacktestService:
             # Check entry conditions (if we don't have a position)
             if not position and strategy.entry_rules:
                 if self._evaluate_rules(strategy.entry_rules, bar, None, prev_bar):
-                    # Determine trade type (default to long)
-                    trade_type = "long"  # Could be determined from rules
+                    # Determine trade type from strategy setting (default to long)
+                    trade_direction = getattr(strategy, 'trade_direction', None) or "long"
+                    if trade_direction == "both":
+                        # Determine direction based on market conditions
+                        trade_type = self._determine_trade_direction(bar, prev_bar)
+                    else:
+                        trade_type = trade_direction  # "long" or "short"
                     
                     # Calculate position size
                     position_value = (available_capital * position_size_pct) / 100.0
+                    
+                    # Skip if insufficient capital
+                    if position_value <= 0 or available_capital <= 0:
+                        continue
+                    
                     quantity = position_value / current_price
+                    
+                    # Skip if quantity is too small (rounding/precision issues)
+                    if quantity <= 0:
+                        continue
                     
                     # Calculate stop loss and take profit prices
                     stop_loss_price = None
@@ -437,7 +483,7 @@ class BacktestService:
             
             return result
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            print(f"Error evaluating rules: {e}")
+            logger.error(f"Error evaluating rules: {e}")
             return False
     
     def _evaluate_single_structured_rule(self, rule: Dict[str, Any], bar: Dict[str, Any], position: Optional[Dict] = None, prev_bar: Optional[Dict] = None) -> bool:
@@ -586,6 +632,74 @@ class BacktestService:
         
         return None
     
+    def _determine_trade_direction(self, bar: Dict[str, Any], prev_bar: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Determine trade direction (long/short) based on market conditions.
+        Used when trade_direction is set to "both".
+        
+        Logic:
+        - If price is above SMA/EMA → bullish → long
+        - If price is below SMA/EMA → bearish → short
+        - If RSI > 50 → bullish → long
+        - If RSI < 50 → bearish → short
+        - If MACD > 0 → bullish → long
+        - If MACD < 0 → bearish → short
+        - Default to long if indicators are neutral
+        """
+        current_price = bar.get("close", 0)
+        if current_price == 0:
+            return "long"  # Default fallback
+        
+        bullish_signals = 0
+        bearish_signals = 0
+        
+        # Check SMA
+        sma = bar.get("sma") or bar.get("sma_20")
+        if sma:
+            if current_price > sma:
+                bullish_signals += 1
+            elif current_price < sma:
+                bearish_signals += 1
+        
+        # Check EMA
+        ema = bar.get("ema") or bar.get("ema_20")
+        if ema:
+            if current_price > ema:
+                bullish_signals += 1
+            elif current_price < ema:
+                bearish_signals += 1
+        
+        # Check RSI
+        rsi = bar.get("rsi") or bar.get("rsi_14")
+        if rsi:
+            if rsi > 50:
+                bullish_signals += 1
+            elif rsi < 50:
+                bearish_signals += 1
+        
+        # Check MACD
+        macd = bar.get("macd")
+        if macd:
+            if macd > 0:
+                bullish_signals += 1
+            elif macd < 0:
+                bearish_signals += 1
+        
+        # Check price trend (if prev_bar available)
+        if prev_bar:
+            prev_price = prev_bar.get("close", 0)
+            if prev_price > 0:
+                if current_price > prev_price:
+                    bullish_signals += 1
+                elif current_price < prev_price:
+                    bearish_signals += 1
+        
+        # Determine direction based on signals
+        if bearish_signals > bullish_signals:
+            return "short"
+        else:
+            return "long"  # Default to long if equal or bullish
+    
     def _calculate_pnl(self, position: Dict[str, Any], exit_price: float) -> float:
         """Calculate profit/loss for a position"""
         if position["type"] == "long":
@@ -636,7 +750,12 @@ class BacktestService:
         # Profit factor
         gross_profit = sum(t.get("pnl", 0) for t in winning_trades)
         gross_loss = abs(sum(t.get("pnl", 0) for t in losing_trades))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+        if gross_loss > 0:
+            profit_factor = gross_profit / gross_loss
+        elif gross_profit > 0:
+            profit_factor = float('inf')  # All trades are winners
+        else:
+            profit_factor = 0.0  # No profit, no loss
         
         # Consecutive wins/losses
         consecutive_wins = self._calculate_consecutive(completed_trades, "win")
@@ -703,7 +822,7 @@ class BacktestService:
             "calmar_ratio": round(calmar_ratio, 2) if calmar_ratio != float('inf') else 999.99,
             "max_drawdown": round(max_drawdown, 2),
             "win_rate": round(win_rate, 2),
-            "profit_factor": round(profit_factor, 2),
+            "profit_factor": round(profit_factor, 2) if profit_factor != float('inf') else 999.99,
             "total_trades": total_trades,
             "winning_trades": len(winning_trades),
             "losing_trades": len(losing_trades),
@@ -721,12 +840,19 @@ class BacktestService:
         if not trades:
             return 0.0
         
+        # Sort trades by exit_date to ensure chronological order
+        # Completed trades should have exit_date, but we handle missing dates gracefully
+        sorted_trades = sorted(
+            trades, 
+            key=lambda t: t.get("exit_date") or t.get("entry_date") or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        )
+        
         # Calculate equity curve
         equity = initial_capital
         peak = initial_capital
         max_dd = 0.0
         
-        for trade in trades:
+        for trade in sorted_trades:
             pnl = trade.get("pnl", 0)
             equity += pnl
             
@@ -770,9 +896,9 @@ class BacktestService:
                     trades_by_exit_date[exit_key] = []
                 trades_by_exit_date[exit_key].append(trade)
         
-        # Track current open positions and cumulative PnL
+        # Track current open positions and available capital
         open_positions = {}  # {entry_date_key: trade}
-        cumulative_pnl = 0.0
+        available_capital = initial_capital
         
         # Generate equity curve points
         for i, bar in enumerate(data):
@@ -783,8 +909,10 @@ class BacktestService:
             # Check if any trades closed on this date
             if date_key in trades_by_exit_date:
                 for trade in trades_by_exit_date[date_key]:
-                    pnl = trade.get("pnl", 0)
-                    cumulative_pnl += pnl
+                    # When trade closes, we get back exit_price * quantity (capital + PnL)
+                    exit_price = trade.get("exit_price", 0)
+                    quantity = trade.get("quantity", 0)
+                    available_capital += exit_price * quantity
                     # Remove from open positions
                     entry_key = trade.get("entry_date")
                     if entry_key:
@@ -795,21 +923,34 @@ class BacktestService:
             # Check if any trades opened on this date
             if date_key in trades_by_entry_date:
                 for trade in trades_by_entry_date[date_key]:
+                    # When trade opens, we invest capital (entry_price * quantity)
+                    entry_price = trade.get("entry_price", 0)
+                    quantity = trade.get("quantity", 0)
+                    available_capital -= entry_price * quantity
                     entry_key = trade.get("entry_date")
                     if entry_key:
                         entry_key = entry_key.date() if hasattr(entry_key, 'date') else entry_key
                         open_positions[entry_key] = trade
             
-            # Calculate current equity = initial capital + cumulative PnL + unrealized PnL from open positions
-            unrealized_pnl = 0.0
+            # Calculate current equity = available_capital + current_value_of_open_positions
+            # For long positions: current_value = current_price * quantity
+            # For short positions: we received entry_price * quantity when opening (already in available_capital)
+            #                     but we need to pay current_price * quantity to close
+            #                     so net value = entry_price * quantity - current_price * quantity
+            #                     = (entry_price - current_price) * quantity
+            current_value_of_positions = 0.0
             for trade in open_positions.values():
                 entry_price = trade.get("entry_price", 0)
                 quantity = trade.get("quantity", 0)
                 trade_type = trade.get("trade_type", "long")
                 if trade_type == "long":
-                    unrealized_pnl += (current_price - entry_price) * quantity
+                    # Long: we own the asset, current value is current_price * quantity
+                    current_value_of_positions += current_price * quantity
                 else:  # short
-                    unrealized_pnl += (entry_price - current_price) * quantity
+                    # Short: we owe the asset, net value = what we received - what we need to pay
+                    # Since available_capital already includes entry_price * quantity,
+                    # we subtract current_price * quantity to get net position value
+                    current_value_of_positions += (entry_price - current_price) * quantity
             
             # Also account for final position if it exists and hasn't been closed
             if final_position and i == len(data) - 1:
@@ -817,11 +958,11 @@ class BacktestService:
                 quantity = final_position.get("quantity", 0)
                 trade_type = final_position.get("type", "long")
                 if trade_type == "long":
-                    unrealized_pnl += (current_price - entry_price) * quantity
+                    current_value_of_positions += current_price * quantity
                 else:  # short
-                    unrealized_pnl += (entry_price - current_price) * quantity
+                    current_value_of_positions += (entry_price - current_price) * quantity
             
-            current_equity = initial_capital + cumulative_pnl + unrealized_pnl
+            current_equity = available_capital + current_value_of_positions
             
             # Update peak
             if current_equity > peak:
@@ -1011,8 +1152,13 @@ class BacktestService:
             result[i]["tr"] = tr
         
         # Calculate ATR (SMA of True Range)
-        for i in range(period, len(true_ranges) + 1):
-            atr = sum(true_ranges[i - period:i]) / period
+        # true_ranges has len(data)-1 elements (indices 0 to len(data)-2)
+        # We need to calculate ATR starting from bar index 'period' (which corresponds to true_ranges index 'period-1')
+        for i in range(period, len(data)):
+            # true_ranges index = i - 1 (since true_ranges starts from bar index 1)
+            tr_start_idx = i - period  # Start index in true_ranges
+            tr_end_idx = i  # End index in true_ranges (exclusive)
+            atr = sum(true_ranges[tr_start_idx:tr_end_idx]) / period
             result[i]["atr"] = atr
             result[i][f"atr_{period}"] = atr
         

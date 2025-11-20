@@ -44,6 +44,7 @@ class BacktestStrategy(Base):
     stop_loss = Column(Float, nullable=True)  # Stop loss percentage
     take_profit = Column(Float, nullable=True)  # Take profit percentage
     position_size = Column(Float, nullable=True)  # Position size percentage
+    trade_direction = Column(String, nullable=True, default="long")  # "long", "short", or "both"
     
     # Natural language query (for AI-generated strategies)
     natural_language_query = Column(Text, nullable=True)

@@ -4,6 +4,9 @@ from app.services.backtest_service import BacktestService
 from app.models.backtest import BacktestStatus
 from app.crud import backtest as crud
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, name="backtest.run_backtest")
@@ -44,7 +47,7 @@ def run_backtest_task(self, strategy_id: int, result_id: int):
             )
             db.commit()
         except Exception as db_error:
-            print(f"Error updating backtest result: {db_error}")
+            logger.error(f"Error updating backtest result: {db_error}")
         
         # Re-raise to mark task as failed (don't retry backtests automatically)
         raise

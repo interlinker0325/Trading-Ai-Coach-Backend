@@ -19,6 +19,8 @@ class BacktestStrategyBase(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     position_size: Optional[float] = None
+    trade_direction: Optional[str] = None
+    trade_direction: Optional[str] = "long"  # "long", "short", or "both"
 
 
 class BacktestStrategyCreate(BacktestStrategyBase):
@@ -39,6 +41,7 @@ class BacktestStrategyUpdate(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     position_size: Optional[float] = None
+    trade_direction: Optional[str] = None
 
 
 class BacktestStrategyResponse(BacktestStrategyBase):
