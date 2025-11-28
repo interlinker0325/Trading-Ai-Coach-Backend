@@ -17,7 +17,6 @@ class AssetType(str, enum.Enum):
     CRYPTO = "crypto"
     FOREX = "forex"
     COMMODITIES = "commodities"
-    OPTIONS = "options"
     FUTURES = "futures"
 
 

@@ -18,3 +18,5 @@ pydantic-settings
 resend
 openai
 aiohttp
+massive
+websockets

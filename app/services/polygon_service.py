@@ -369,7 +369,7 @@ class PolygonService:
         except Exception as e:
             print("error processing options", e)
             return []
-        
+    
     def _calculate_stock_score(self, change_percent: float, volume: float, price: float) -> float:
         """Calculate AI score for stocks"""
         score = 5.0  # Base score

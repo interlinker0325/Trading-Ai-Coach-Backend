@@ -47,7 +47,7 @@ class BacktestService:
             data_with_indicators = self._calculate_indicators(historical_data, strategy.indicators or [])
 
             # Execute strategy
-            trades, final_position = self._execute_strategy(data_with_indicators, strategy)
+            trades, final_position = await self._execute_strategy(data_with_indicators, strategy)
             
             # Calculate performance metrics
             metrics = self._calculate_metrics(trades, strategy.initial_capital)
@@ -113,12 +113,12 @@ class BacktestService:
         # Handle asset_type enum - get the value directly
         asset_type_value = str(strategy.asset_type.value) if hasattr(strategy.asset_type, 'value') else str(strategy.asset_type)
         
-        multiplier = 1
-        timespan = timeframe
-        
         # Format dates
         start_date_str = start_date.strftime("%Y-%m-%d")
         end_date_str = end_date.strftime("%Y-%m-%d")
+        
+        multiplier = 1
+        timespan = timeframe
         
         # Format symbol based on asset type
         symbol = self._format_symbol_for_polygon(symbol_str, asset_type_value)
@@ -127,7 +127,7 @@ class BacktestService:
         url = f"https://api.massive.com/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date_str}/{end_date_str}?adjusted=true&sort=asc&limit=50000"
         
         try:
-            # Use asset type to determine API type (stocks, crypto, forex, options)
+            # Use asset type to determine API type (stocks, crypto, forex)
             api_type = asset_type_value
             
             # Collect all bars from paginated responses
@@ -279,7 +279,7 @@ class BacktestService:
         
         return result
     
-    def _execute_strategy(
+    async def _execute_strategy(
         self, data: List[Dict[str, Any]], strategy: BacktestStrategy
     ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
@@ -304,7 +304,7 @@ class BacktestService:
                 exit_price = None
                 
                 # Check stop loss (using high/low for intraday hits)
-                if strategy.stop_loss:
+                if not exit_reason and strategy.stop_loss:
                     stop_loss_price = position["stop_loss"]
                     high = bar["high"]
                     low = bar["low"]
@@ -346,10 +346,13 @@ class BacktestService:
                 # Execute exit if condition met
                 if exit_reason:
                     pnl = self._calculate_pnl(position, exit_price)
-                    pnl_pct = (pnl / (position["entry_price"] * position["quantity"])) * 100
+                    
+                    # Calculate P&L percentage
+                    pnl_pct = (pnl / (position["entry_price"] * position["quantity"])) * 100 if (position["entry_price"] * position["quantity"]) > 0 else 0
+                    
                     duration = (current_date - position["entry_date"]).total_seconds() / 86400  # days
                     
-                    trades.append({
+                    trade_dict = {
                         "entry_date": position["entry_date"],
                         "exit_date": current_date,
                         "entry_price": position["entry_price"],
@@ -362,9 +365,12 @@ class BacktestService:
                         "stop_loss_price": position.get("stop_loss"),
                         "take_profit_price": position.get("take_profit"),
                         "exit_reason": exit_reason,
-                    })
+                        "is_option": False,
+                    }
                     
-                    # Update capital - add back exit value (exit_price * quantity)
+                    trades.append(trade_dict)
+                    
+                    # Update capital - add back exit value
                     available_capital += exit_price * position["quantity"]
                     position = None
             
@@ -379,59 +385,64 @@ class BacktestService:
                     else:
                         trade_type = trade_direction  # "long" or "short"
                     
-                    # Calculate position size
-                    position_value = (available_capital * position_size_pct) / 100.0
-                    
-                    # Skip if insufficient capital
-                    if position_value <= 0 or available_capital <= 0:
-                        continue
-                    
-                    quantity = position_value / current_price
-                    
-                    # Skip if quantity is too small (rounding/precision issues)
-                    if quantity <= 0:
-                        continue
-                    
-                    # Calculate stop loss and take profit prices
-                    stop_loss_price = None
-                    take_profit_price = None
-                    
-                    if strategy.stop_loss:
-                        if trade_type == "long":
-                            stop_loss_price = current_price * (1 - strategy.stop_loss / 100.0)
-                        else:  # short
-                            stop_loss_price = current_price * (1 + strategy.stop_loss / 100.0)
-                    
-                    if strategy.take_profit:
-                        if trade_type == "long":
-                            take_profit_price = current_price * (1 + strategy.take_profit / 100.0)
-                        else:  # short
-                            take_profit_price = current_price * (1 - strategy.take_profit / 100.0)
-                    
-                    # Open position
-                    position = {
-                        "type": trade_type,
-                        "entry_price": current_price,
-                        "entry_date": current_date,
-                        "quantity": quantity,
-                        "stop_loss": stop_loss_price,
-                        "take_profit": take_profit_price,
-                    }
-                    
-                    # Deduct capital
-                    available_capital -= position_value
+                    # Stocks/Crypto/Forex position sizing
+                        position_value = (available_capital * position_size_pct) / 100.0
+                        
+                        # Skip if insufficient capital
+                        if position_value <= 0 or available_capital <= 0:
+                            continue
+                        
+                        quantity = position_value / current_price
+                        
+                        # Skip if quantity is too small (rounding/precision issues)
+                        if quantity <= 0:
+                            continue
+                        
+                        # Calculate stop loss and take profit prices
+                        stop_loss_price = None
+                        take_profit_price = None
+                        
+                        if strategy.stop_loss:
+                            if trade_type == "long":
+                                stop_loss_price = current_price * (1 - strategy.stop_loss / 100.0)
+                            else:  # short
+                                stop_loss_price = current_price * (1 + strategy.stop_loss / 100.0)
+                        
+                        if strategy.take_profit:
+                            if trade_type == "long":
+                                take_profit_price = current_price * (1 + strategy.take_profit / 100.0)
+                            else:  # short
+                                take_profit_price = current_price * (1 - strategy.take_profit / 100.0)
+                        
+                        # Open position
+                        position = {
+                            "type": trade_type,
+                            "entry_price": current_price,
+                            "entry_date": current_date,
+                            "quantity": quantity,
+                            "stop_loss": stop_loss_price,
+                            "take_profit": take_profit_price,
+                            "is_option": False,
+                        }
+                        
+                        # Deduct capital
+                        available_capital -= position_value
         
         # Close any remaining position at the end
         if position and len(data) > 0:
             last_bar = data[-1]
-            exit_price = last_bar["close"]
             exit_date = last_bar["date"]
+            exit_price = last_bar["close"]
+            exit_reason = "end_of_period"
             
             pnl = self._calculate_pnl(position, exit_price)
-            pnl_pct = (pnl / (position["entry_price"] * position["quantity"])) * 100
+            
+            # Calculate P&L percentage
+            pnl_pct = (pnl / (position["entry_price"] * position["quantity"])) * 100 if (position["entry_price"] * position["quantity"]) > 0 else 0
+            
             duration = (exit_date - position["entry_date"]).total_seconds() / 86400
             
-            trades.append({
+            trade_dict = {
                 "entry_date": position["entry_date"],
                 "exit_date": exit_date,
                 "entry_price": position["entry_price"],
@@ -443,9 +454,13 @@ class BacktestService:
                 "duration_days": duration,
                 "stop_loss_price": position.get("stop_loss"),
                 "take_profit_price": position.get("take_profit"),
-                "exit_reason": "end_of_period",
-            })
-            # Update capital for final position closure
+                "exit_reason": exit_reason,
+                "is_option": False,
+            }
+            
+            trades.append(trade_dict)
+            
+            # Update capital - add back exit value
             available_capital += exit_price * position["quantity"]
             position = None
         
@@ -701,7 +716,10 @@ class BacktestService:
             return "long"  # Default to long if equal or bullish
     
     def _calculate_pnl(self, position: Dict[str, Any], exit_price: float) -> float:
-        """Calculate profit/loss for a position"""
+        """
+        Calculate profit/loss for a position.
+        For stocks/crypto/forex: calculates P&L based on price changes.
+        """
         if position["type"] == "long":
             return (exit_price - position["entry_price"]) * position["quantity"]
         else:  # short
@@ -909,10 +927,11 @@ class BacktestService:
             # Check if any trades closed on this date
             if date_key in trades_by_exit_date:
                 for trade in trades_by_exit_date[date_key]:
-                    # When trade closes, we get back exit_price * quantity (capital + PnL)
                     exit_price = trade.get("exit_price", 0)
+                    # Stocks/crypto/forex: add back exit value
                     quantity = trade.get("quantity", 0)
                     available_capital += exit_price * quantity
+                    
                     # Remove from open positions
                     entry_key = trade.get("entry_date")
                     if entry_key:
@@ -923,40 +942,36 @@ class BacktestService:
             # Check if any trades opened on this date
             if date_key in trades_by_entry_date:
                 for trade in trades_by_entry_date[date_key]:
-                    # When trade opens, we invest capital (entry_price * quantity)
+                    # Stocks/crypto/forex: deduct entry value
                     entry_price = trade.get("entry_price", 0)
                     quantity = trade.get("quantity", 0)
                     available_capital -= entry_price * quantity
+                    
                     entry_key = trade.get("entry_date")
                     if entry_key:
                         entry_key = entry_key.date() if hasattr(entry_key, 'date') else entry_key
                         open_positions[entry_key] = trade
             
             # Calculate current equity = available_capital + current_value_of_open_positions
-            # For long positions: current_value = current_price * quantity
-            # For short positions: we received entry_price * quantity when opening (already in available_capital)
-            #                     but we need to pay current_price * quantity to close
-            #                     so net value = entry_price * quantity - current_price * quantity
-            #                     = (entry_price - current_price) * quantity
             current_value_of_positions = 0.0
             for trade in open_positions.values():
                 entry_price = trade.get("entry_price", 0)
-                quantity = trade.get("quantity", 0)
                 trade_type = trade.get("trade_type", "long")
+                quantity = trade.get("quantity", 0)
+                
                 if trade_type == "long":
-                    # Long: we own the asset, current value is current_price * quantity
+                    # Long: current value = current_price * quantity
                     current_value_of_positions += current_price * quantity
                 else:  # short
-                    # Short: we owe the asset, net value = what we received - what we need to pay
-                    # Since available_capital already includes entry_price * quantity,
-                    # we subtract current_price * quantity to get net position value
+                    # Short: net value = (entry_price - current_price) * quantity
                     current_value_of_positions += (entry_price - current_price) * quantity
             
             # Also account for final position if it exists and hasn't been closed
             if final_position and i == len(data) - 1:
                 entry_price = final_position.get("entry_price", 0)
-                quantity = final_position.get("quantity", 0)
                 trade_type = final_position.get("type", "long")
+                quantity = final_position.get("quantity", 0)
+                
                 if trade_type == "long":
                     current_value_of_positions += current_price * quantity
                 else:  # short
